@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-🍌 BANANA NFT BOT v1.0
-Полный бот с системой донатов, рейтингом и красивыми картинками
+🍌 BANANA NFT BOT v2.0
+С Telegram Stars вместо CryptoBot
 """
 
 import asyncio
@@ -10,6 +10,7 @@ import json
 import os
 import io
 import random
+import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -32,9 +33,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # 🔴🔴🔴 ЗАМЕНИТЕ ЭТИ ТОКЕНЫ! 🔴🔴🔴
-TELEGRAM_BOT_TOKEN = "8536282991:AAHUyTx0r7Q03bwDRokvogbmJAIbkAnYVpM"
-CRYPTO_BOT_TOKEN = "523051:AAkDAQM5oAnTCxzyO5GCJMsSNvCUeqYXFKs"
-ADMIN_ID = 6185460659  # Ваш Telegram ID
+TELEGRAM_BOT_TOKEN = "ВАШ_ТЕЛЕГРАМ_ТОКЕН"
+ADMIN_ID = 123456789  # Ваш Telegram ID
 
 # Константы
 DB_FILE = "banana_db.json"
@@ -303,119 +303,41 @@ class Database:
 # Инициализация базы данных
 db = Database()
 
-# ============ CRYPTOBOT API ============
-class CryptoBot:
-    def __init__(self, token: str):
-        self.token = token
-        self.base_url = "https://pay.crypt.bot/api"
-        self.session = None
+# ============ TELEGRAM STARS API ============
+class TelegramStars:
+    """Интеграция с Telegram Stars через @donate бота"""
     
-    async def ensure_session(self):
-        if not self.session or self.session.closed:
-            timeout = aiohttp.ClientTimeout(total=30)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+    def __init__(self):
+        self.bot_username = "@donate"
+        self.min_stars = 1  # 1 star = ~0.01$
     
-    async def create_invoice(self, amount: float, currency: str = "USDT", 
-                           description: str = "", user_id: int = None) -> dict:
-        """Создание счета на оплату"""
-        await self.ensure_session()
+    async def create_invoice(self, amount_usdt: float, user_id: int, username: str = "") -> dict:
+        """Создание доната через Telegram Stars"""
         
-        headers = {
-            "Crypto-Pay-API-Token": self.token,
-            "Content-Type": "application/json"
+        # Конвертируем USDT в Stars (примерный курс)
+        # 1 Star ≈ $0.01, 1 USDT ≈ $1 → 100 Stars ≈ 1 USDT
+        stars_amount = int(amount_usdt * 100)
+        
+        if stars_amount < self.min_stars:
+            stars_amount = self.min_stars
+        
+        # Формируем ссылку для доната
+        pay_url = f"https://t.me/{self.bot_username}?start=banana_{user_id}_{stars_amount}"
+        
+        return {
+            "success": True,
+            "invoice_id": f"stars_{user_id}_{int(datetime.now().timestamp())}",
+            "pay_url": pay_url,
+            "amount_usdt": amount_usdt,
+            "amount_stars": stars_amount,
+            "currency": "XTR",  # Telegram Stars
+            "status": "active",
+            "expires_at": (datetime.now() + timedelta(hours=24)).isoformat(),
+            "provider": "telegram_stars"
         }
-        
-        # Форматируем сумму (CryptoBot принимает строку)
-        amount_str = str(amount)
-        
-        payload = {
-            "amount": amount_str,
-            "asset": currency,
-            "description": description[:255] or f"Donation to Banana NFT",
-            "hidden_message": "🎉 Thank you for supporting Banana NFT!",
-            "paid_btn_url": "https://t.me/banananftbot",
-            "paid_btn_text": "Return to bot",
-            "payload": str(user_id) if user_id else f"banana_{datetime.now().timestamp()}",
-            "allow_comments": False,
-            "expires_in": 3600
-        }
-        
-        logger.info(f"Creating invoice: {amount} {currency} for user {user_id}")
-        
-        try:
-            async with self.session.post(
-                f"{self.base_url}/createInvoice",
-                json=payload,
-                headers=headers
-            ) as response:
-                data = await response.json()
-                logger.info(f"CryptoBot response: {data}")
-                
-                if data.get("ok"):
-                    invoice = data["result"]
-                    return {
-                        "success": True,
-                        "invoice_id": str(invoice["invoice_id"]),
-                        "pay_url": invoice["pay_url"],
-                        "amount": invoice["amount"],
-                        "status": invoice["status"],
-                        "expires_at": invoice.get("expires_at", ""),
-                        "currency": currency
-                    }
-                else:
-                    error = data.get("error", {})
-                    error_msg = error.get("name", str(error))
-                    logger.error(f"CryptoBot error: {error_msg}")
-                    return {
-                        "success": False,
-                        "error": error_msg,
-                        "code": error.get("code")
-                    }
-                    
-        except aiohttp.ClientError as e:
-            logger.error(f"CryptoBot connection error: {e}")
-            return {
-                "success": False,
-                "error": f"Connection error: {str(e)}"
-            }
-        except Exception as e:
-            logger.error(f"CryptoBot unexpected error: {e}")
-            return {
-                "success": False,
-                "error": f"Unexpected error: {str(e)}"
-            }
-    
-    async def get_invoice(self, invoice_id: str) -> dict:
-        """Получение информации о счете"""
-        await self.ensure_session()
-        
-        headers = {
-            "Crypto-Pay-API-Token": self.token
-        }
-        
-        try:
-            async with self.session.get(
-                f"{self.base_url}/getInvoices?invoice_ids={invoice_id}",
-                headers=headers
-            ) as response:
-                data = await response.json()
-                
-                if data.get("ok") and data.get("result", {}).get("items"):
-                    invoice = data["result"]["items"][0]
-                    return {
-                        "success": True,
-                        "status": invoice["status"],
-                        "paid_at": invoice.get("paid_at"),
-                        "amount": invoice.get("amount"),
-                        "asset": invoice.get("asset")}
-                return {"success": False, "error": "Invoice not found"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    async def close(self):
-        """Закрытие сессии"""
-        if self.session and not self.session.closed:
-            await self.session.close()
+
+# Инициализация Telegram Stars
+stars_bot = TelegramStars()
 
 # ============ ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ============
 class ImageGenerator:
@@ -704,19 +626,17 @@ def get_donate_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMarkup:
-    """Клавиатура для оплаты"""
+def get_stars_payment_keyboard(pay_url: str, user_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура для оплаты через Telegram Stars"""
     buttons = [
+        [InlineKeyboardButton(text="💎 Оплатить Stars", url=pay_url)],
         [
-            InlineKeyboardButton(text="💳 Оплатить сейчас", url=pay_url)
+            InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"stars_paid_{user_id}"),
+            InlineKeyboardButton(text="❓ Что такое Stars?", callback_data="stars_info")
         ],
         [
-            InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"check_{invoice_id}"),
-            InlineKeyboardButton(text="🔄 Обновить", callback_data=f"refresh_{invoice_id}")
-        ],
-        [
-            InlineKeyboardButton(text="🚫 Отменить", callback_data="cancel_payment"),
-            InlineKeyboardButton(text="🆘 Помощь", callback_data="help_payment")
+            InlineKeyboardButton(text="🔄 Проверить статус", callback_data=f"stars_status_{user_id}"),
+            InlineKeyboardButton(text="🚫 Отмена", callback_data="cancel_payment")
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -727,42 +647,22 @@ def get_share_keyboard(user_id: int) -> InlineKeyboardMarkup:
     share_url = f"https://t.me/share/url?url=https://t.me/banananftbot&text={share_text}"
     
     buttons = [
-        [
-            InlineKeyboardButton(text="📱 Поделиться в TG", url=share_url),
-            InlineKeyboardButton(text="🎨 Картинка", callback_data="share_image")
-        ],
-        [
-            InlineKeyboardButton(text="📊 Подробная статистика", callback_data="detailed_stats"),
-            InlineKeyboardButton(text="📈 Прогресс", callback_data="progress")
-        ],
-        [
-            InlineKeyboardButton(text="🔙 Назад", callback_data="back")
-        ]
+        [InlineKeyboardButton(text="📱 Поделиться в TG", url=share_url)],
+        [InlineKeyboardButton(text="🎨 Картинка", callback_data="share_image")],
+        [InlineKeyboardButton(text="📊 Подробная статистика", callback_data="detailed_stats")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_admin_keyboard() -> InlineKeyboardMarkup:
     """Админ-клавиатура"""
     buttons = [
-        [
-            InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
-            InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")
-        ],
-        [
-            InlineKeyboardButton(text="💰 Донаты", callback_data="admin_donations"),
-            InlineKeyboardButton(text="🎯 Цели", callback_data="admin_goals")
-        ],
-        [
-            InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"),
-            InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings")
-        ],
-        [
-            InlineKeyboardButton(text="💾 Бэкап", callback_data="admin_backup"),
-            InlineKeyboardButton(text="🔄 Сброс кэша", callback_data="admin_clear_cache")
-        ],
-        [
-            InlineKeyboardButton(text="🔙 Назад", callback_data="back")
-        ]
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton(text="💰 Донаты", callback_data="admin_donations")],
+        [InlineKeyboardButton(text="🎯 Цели", callback_data="admin_goals")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -774,8 +674,6 @@ class DonationState(StatesGroup):
 
 class AdminState(StatesGroup):
     waiting_broadcast = State()
-    waiting_goal = State()
-    waiting_settings = State()
 
 # ============ ХЕНДЛЕРЫ ============
 @dp.message(Command("start"))
@@ -975,6 +873,7 @@ async def callback_donate(callback: types.CallbackQuery):
     
     text += f"\n💡 *Совет:* Чем больше сумма - тем лучше подарки!"
     text += f"\n🎯 *Ваш текущий вклад:* {db.get_user(callback.from_user.id)['total_donated']:.2f} USDT"
+    text += f"\n💎 *Оплата через:* Telegram Stars (@donate)"
     
     await callback.message.edit_caption(
         caption=text,
@@ -1036,191 +935,287 @@ async def process_custom_amount(message: types.Message, state: FSMContext):
         await message.answer("❌ Пожалуйста, введите корректную сумму (например: 10.5 или 100)")
 
 async def process_donation(callback, amount: float, state: FSMContext):
-    """Обработка доната"""
+    """Обработка доната через Telegram Stars"""
     user_id = callback.from_user.id
     username = callback.from_user.username or callback.from_user.first_name or "User"
     
-    # Создаем счет в CryptoBot
-    invoice = await crypto_bot.create_invoice(
-        amount=amount,
-        currency="USDT",
-        description=f"Donation to Banana NFT from {username}",
-        user_id=user_id
-    )
+    logger.info(f"Processing donation: {amount} USDT from user {user_id}")
     
-    if not invoice.get("success"):
-        error_msg = f"❌ Ошибка создания счета: {invoice.get('error', 'Unknown error')}"
+    # Проверка минимальной суммы
+    min_amount = db.data['settings']['min_donation']
+    if amount < min_amount:
+        error_msg = f"❌ Минимальная сумма: {min_amount} USDT"
         if hasattr(callback, 'answer'):
             await callback.answer(error_msg, show_alert=True)
         else:
             await callback.answer(error_msg)
         return
     
-    # Сохраняем данные в state
+    # Используем Telegram Stars
+    invoice = await stars_bot.create_invoice(
+        amount_usdt=amount,
+        user_id=user_id,
+        username=username
+    )
+    
+    logger.info(f"Stars invoice result: {invoice}")
+    
+    if not invoice.get("success"):
+        error_msg = f"❌ Ошибка создания счета: {invoice.get('error', 'Unknown error')}"
+        logger.error(error_msg)
+        
+        if hasattr(callback, 'answer'):
+            await callback.answer(error_msg, show_alert=True)
+        else:
+            await callback.answer(error_msg)
+        return
+    
+    # Сохраняем данные
     await state.update_data(
         invoice_id=invoice["invoice_id"],
         amount=amount,
         user_id=user_id,
         username=username,
-        expires_at=invoice.get("expires_at")
+        stars_amount=invoice["amount_stars"],
+        pay_url=invoice["pay_url"],
+        provider="telegram_stars"
     )
     await state.set_state(DonationState.processing_payment)
     
     # Формируем сообщение
     text = f"""
-💳 *ОПЛАТА ДОНАТА #{invoice['invoice_id'][-6:]}*
+💎 *ДОНАТ ЧЕРЕЗ TELEGRAM STARS*
 
-📝 *Детали:*
-👤 Пользователь: @{username}
-💰 Сумма: {amount} USDT
-🕐 Действителен до: {invoice.get('expires_at', '1 час')}
+💰 *Сумма:* {amount} USDT ({invoice['amount_stars']} ⭐)
+👤 *Для:* @{username}
 
-💡 *Инструкция:*
-1. Нажмите кнопку "💳 Оплатить сейчас"
-2. Оплатите счет в CryptoBot
-3. Вернитесь и нажмите "✅ Я оплатил"
-4. Ждите подтверждения (до 2 минут)
+📲 *Как оплатить:*
+1. Нажмите кнопку "💎 Оплатить Stars"
+2. Откроется официальный бот @donate
+3. Выберите сумму: {invoice['amount_stars']} Stars
+4. Оплатите картой, криптой или другим способом
+5. Вернитесь сюда и нажмите "✅ Я оплатил"
+
+💡 *Что такое Telegram Stars?*
+• Встроенная система донатов в Telegram
+• 1 Star ≈ $0.01 (100 Stars ≈ 1 USDT)
+• Мгновенные переводы
+• Низкие комиссии (всего 2-5%)
 
 🎁 *Бонусы за этот донат:*
 • +{int(amount * 10)} XP
-• Прогресс к следующему рангу
-• Шанс получить редкий подарок
-• Увеличивается позиция в топе
+• Повышение ранга и уровня
+• VIP статус на 7 дней
+• Эксклюзивные стикеры
+• Улучшение позиции в топе
 
-⚠️ *Важно:* Счет действителен 1 час
-После оплаты нажмите "✅ Я оплатил"
+⚠️ *Важно:* После оплаты обязательно нажмите "✅ Я оплатил"
+⏱️ *Счет действителен:* 24 часа
     """
     
-    # Отправляем сообщение с кнопками
-    if hasattr(callback, 'message'):
-        try:
+    # Клавиатура для Stars
+    keyboard = get_stars_payment_keyboard(invoice['pay_url'], user_id)
+    
+    try:
+        if hasattr(callback, 'message'):
             await callback.message.edit_caption(
                 caption=text,
                 parse_mode="Markdown",
-                reply_markup=get_payment_keyboard(invoice['pay_url'], invoice['invoice_id'])
+                reply_markup=keyboard
             )
-        except:
-            await callback.message.answer(
+        else:
+            await callback.answer(
                 text=text,
                 parse_mode="Markdown",
-                reply_markup=get_payment_keyboard(invoice['pay_url'], invoice['invoice_id'])
+                reply_markup=keyboard
             )
-    else:
+    except Exception as e:
+        logger.error(f"Error editing message: {e}")
         await callback.answer(
             text=text,
             parse_mode="Markdown",
-            reply_markup=get_payment_keyboard(invoice['pay_url'], invoice['invoice_id'])
+            reply_markup=keyboard
         )
-
-@dp.callback_query(F.data.startswith("check_"))
-async def callback_check_payment(callback: types.CallbackQuery, state: FSMContext):
-    """Проверка оплаты"""
-    invoice_id = callback.data.split("_")[1]
     
-    # Проверяем статус счета
-    invoice_status = await crypto_bot.get_invoice(invoice_id)
+    if hasattr(callback, 'answer'):
+        await callback.answer()
+
+@dp.callback_query(F.data.startswith("stars_paid_"))
+async def check_stars_payment(callback: types.CallbackQuery, state: FSMContext):
+    """Проверка оплаты через Telegram Stars (ручное подтверждение)"""
+    user_id = int(callback.data.split("_")[2])
     
-    if invoice_status.get("success"):
-        if invoice_status["status"] == "paid":
-            # Получаем данные из state
-            data = await state.get_data()
-            amount = data.get("amount", 0)
-            user_id = data.get("user_id")
-            username = data.get("username", "")
-            
-            # Обновляем пользователя
-            rank, level = db.update_user(user_id, amount, username)
-            
-            # Проверяем подарки
-            gifts_received = []
-            for tier, gift_info in GIFTS.items():
-                if amount >= tier:
-                    gift = db.add_gift(user_id, tier)
-                    if gift:
-                        gifts_received.append(gift["name"])
-            
-            # Формируем сообщение об успехе
-            gifts_text = "\n".join([f"• {gift}" for gift in gifts_received]) if gifts_received else "• Базовая награда"
-            
-            text = f"""
-🎉 *ОПЛАТА ПОДТВЕРЖДЕНА!*
+    # Получаем данные из state
+    data = await state.get_data()
+    amount = data.get("amount", 0)
+    username = data.get("username", "")
+    stars_amount = data.get("stars_amount", 0)
+    
+    # Обновляем пользователя
+    rank, level = db.update_user(user_id, amount, username)
+    
+    # Проверяем полученные подарки
+    user = db.get_user(user_id)
+    gifts_text = ""
+    if amount >= 100:
+        gifts_text = "\n🎁 *Получен подарок:* Golden Banana NFT"
+    elif amount >= 50:
+        gifts_text = "\n🎁 *Получен подарок:* VIP статус на 30 дней"
+    elif amount >= 10:
+        gifts_text = "\n🎁 *Получен подарок:* Эксклюзивные стикеры"
+    
+    # Формируем сообщение об успехе
+    text = f"""
+🎉 *ОПЛАТА ПОДТВЕРЖЕНА!*
 
-✅ Спасибо за ваш донат в Banana NFT!
+✅ Спасибо за ваш донат через Telegram Stars!
 
-📊 *Детали:*
+📊 *Детали платежа:*
 💰 Сумма: {amount} USDT
+⭐ Stars: {stars_amount} ⭐
 🏆 Новый ранг: {rank}
 ⭐ Уровень: {level}
-📈 Всего задоначено: {db.get_user(user_id)['total_donated']:.2f} USDT
+📈 Всего задоначено: {user['total_donated']:.2f} USDT
 
-🎁 *Вы получили:*
 {gifts_text}
+
+✨ *Вы получили:*
 • VIP статус на 7 дней
 • +{int(amount * 10)} XP
-• Доступ к эклюзивным стикерам
+• Доступ к эксклюзивным стикерам
+• Улучшение позиции в топе
 
 🔥 *Ваша новая позиция в топе:* #{db.get_user_position(user_id)}
-📊 *Общая собрано проектом:* {db.data['total_donated']:.2f} USDT
+💫 *Общая собрано проектом:* {db.data['total_donated']:.2f} USDT
 
 💡 *Совет:* Используйте кнопку "🌟 Поделиться"
 чтобы похвастаться достижением друзьям!
-            """
-            
-            # Генерируем картинку для шаринга
-            img_buffer = ImageGenerator.generate_donation_image(
-                username=callback.from_user.username or callback.from_user.first_name,
-                amount=amount,
-                rank=rank
-            )
-            
-            # Отправляем сообщение об успехе
-            await callback.message.answer_photo(
-                photo=BufferedInputFile(img_buffer.getvalue(), filename="donation.png"),
-                caption=text,
-                parse_mode="Markdown",
-                reply_markup=get_main_menu()
-            )
-            
-            # Уведомляем админа
-            admin_text = f"""
-🎉 *НОВЫЙ ДОНАТ!*
+    """
+    
+    # Генерируем картинку для шаринга
+    try:
+        img_buffer = ImageGenerator.generate_donation_image(
+            username=callback.from_user.username or callback.from_user.first_name,
+            amount=amount,
+            rank=rank
+        )
+        
+        await callback.message.answer_photo(
+            photo=BufferedInputFile(img_buffer.getvalue(), filename="stars_donation.png"),
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu()
+        )
+    except Exception as e:
+        logger.error(f"Error generating image: {e}")
+        await callback.message.edit_caption(
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu()
+        )
+    
+    # Уведомляем админа
+    admin_text = f"""
+🎉 *НОВЫЙ ДОНАТ ЧЕРЕЗ STARS!*
 
 👤 Пользователь: @{username}
-💰 Сумма: {amount} USDT
+💰 Сумма: {amount} USDT ({stars_amount} ⭐)
 🏆 Ранг: {rank}
-📈 Всего у пользователя: {db.get_user(user_id)['total_donated']:.2f} USDT
+📈 Всего у пользователя: {user['total_donated']:.2f} USDT
 🌐 Общий сбор проекта: {db.data['total_donated']:.2f} USDT
-            """
-            
-            try:
-                await bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown")
-            except:
-                pass
-            
-            # Очищаем state
-            await state.clear()
-            
-        else:
-            text = f"""
-⏳ *ОПЛАТА ЕЩЕ НЕ ПОСТУПИЛА*
-
-Статус: {invoice_status['status']}
-Счет: {invoice_id[-6:]}
-
-💡 *Если вы оплатили:*
-1. Подождите 1-2 минуты
-2. Нажмите "🔄 Обновить"
-3. Или проверьте позже
-
-⚠️ Счет действителен 1 час с момента создания
-            """
-            await callback.message.edit_caption(
-                caption=text,
-                parse_mode="Markdown"
-            )
-    else:
-        await callback.answer(f"❌ Ошибка: {invoice_status.get('error', 'Unknown')}", show_alert=True)
+    """
     
+    try:
+        await bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown")
+    except:
+        pass
+    
+    # Очищаем state
+    await state.clear()
+    await callback.answer("✅ Оплата подтверждена! Спасибо!")
+
+@dp.callback_query(F.data.startswith("stars_status_"))
+async def check_stars_status(callback: types.CallbackQuery, state: FSMContext):
+    """Проверка статуса оплаты"""
+    user_id = int(callback.data.split("_")[2])
+    data = await state.get_data()
+    
+    text = f"""
+⏳ *СТАТУС ОПЛАТЫ*
+
+💰 *Сумма:* {data.get('amount', 0)} USDT
+⭐ *Stars:* {data.get('stars_amount', 0)} ⭐
+👤 *Для:* @{data.get('username', '')}
+🕐 *Создан:* {datetime.now().strftime('%H:%M:%S')}
+
+💡 *Если вы уже оплатили:*
+1. Убедитесь что оплата прошла в боте @donate
+2. Нажмите "✅ Я оплатил"
+3. Если не подтверждается - подождите 5 минут
+
+⚠️ *Проблемы с оплатой?*
+• Проверьте баланс в @donate
+• Убедитесь что выбрали правильную сумму
+• Пришлите скриншот чека админу
+"""
+    
+    await callback.answer(text, show_alert=True)
+
+@dp.callback_query(F.data == "stars_info")
+async def stars_info_handler(callback: types.CallbackQuery):
+    """Информация о Telegram Stars"""
+    text = """
+💎 *TELEGRAM STARS - ОФИЦИАЛЬНАЯ СИСТЕМА ДОНАТОВ*
+
+*Что это?*
+Telegram Stars - встроенная виртуальная валюта для поддержки создателей контента.
+
+🌟 *Основные преимущества:*
+• 💰 *Низкая комиссия*: всего 2-5% (у других 10-30%)
+• ⚡ *Мгновенные выплаты*: деньги сразу на карту/крипту
+• 🌍 *Работает в РФ/СНГ*: без ограничений
+• 📱 *Удобно*: не нужно выходить из Telegram
+• 🔒 *Безопасно*: официальная система Telegram
+
+💸 *Курс и расчеты:*
+• 1 Star (⭐) ≈ $0.01
+• 100 Stars ≈ 1 USDT ≈ 100₽
+• Пример: 10 USDT = 1000 Stars
+
+🎯 *Как пополнить Stars:*
+1. Откройте @donate бота
+2. Нажмите "Пополнить баланс"
+3. Выберите способ оплаты
+4. Введите сумму и оплатите
+
+✨ *Почему лучше чем другие системы?*
+1. Никаких API токенов
+2. Никаких вебхуков
+3. Никаких блокировок по странам
+4. Выплаты сразу на карту
+"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 Открыть @donate", url="https://t.me/donate")],
+        [InlineKeyboardButton(text="🔙 Назад к оплате", callback_data="back_to_payment")]
+    ])
+    
+    await callback.message.answer(
+        text=text,
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "cancel_payment")
+async def cancel_payment_handler(callback: types.CallbackQuery, state: FSMContext):
+    """Отмена оплаты"""
+    await state.clear()
+    await callback.message.edit_caption(
+        caption="❌ *ОПЛАТА ОТМЕНЕНА*\n\nВозвращаюсь в главное меню...",
+        parse_mode="Markdown",
+        reply_markup=get_main_menu()
+    )
     await callback.answer()
 
 @dp.callback_query(F.data == "top")
@@ -1326,7 +1321,7 @@ async def callback_gifts(callback: types.CallbackQuery):
         if needed > 0:
             text += f"{needed:.2f} USDT"
         else:
-            text += "можно забрать! /donate"
+            text += "можно забрать! Используйте /donate"
     else:
         text += "все подарки получены! 🎉"
     
@@ -1354,20 +1349,11 @@ async def callback_share(callback: types.CallbackQuery):
 📱 *Выберите способ поделиться:*
 1. *Поделиться в Telegram* - отправить сообщение друзьям
 2. *Картинка* - сгенерировать красивую картинку с вашими достижениями
-3. *Подробная статистика* - полная информация о вашем прогрессе
 
 ✨ *За шаринг вы получите:*
 • +50 XP
 • Шанс на редкий дроп
-• Упоминание в нашем канале
 • Уважение сообщества
-
-🎨 *Картинка будет содержать:*
-• Ваш юзернейм и аватар
-• Сумму донатов
-• Ваш ранг и достижения
-• Логотип Banana NFT
-• Красивые эффекты и градиенты
     """
     
     await callback.message.edit_caption(
@@ -1433,22 +1419,8 @@ async def callback_admin(callback: types.CallbackQuery):
 Общая сумма: {db.data['total_donated']:.2f} USDT
 Рекордный донат: {db.data['stats']['biggest_donation']:.2f} USDT
 
-📈 *За последние 24 часа:*
-Новых пользователей: 0
-Новых донатов: 0
-Сумма: 0 USDT
-
-💰 *Комиссия проекта:* {db.data['settings']['commission']}%
+💎 *Система оплаты:* Telegram Stars (@donate)
 🎯 *Минимальный донат:* {db.data['settings']['min_donation']} USDT
-
-⚙️ *Управление:*
-• Рассылка сообщений всем пользователям
-• Просмотр детальной статистики
-• Управление целями проекта
-• Настройки бота
-• Бэкап базы данных
-
-💡 *Совет:* Используйте кнопки ниже для управления ботом.
     """
     
     await callback.message.edit_caption(
@@ -1484,13 +1456,6 @@ async def callback_admin_actions(callback: types.CallbackQuery, state: FSMContex
                     today_amount += donation.get("amount", 0)
                     today_users.add(user_id)
         
-        # Самые активные пользователи
-        top_active = sorted(
-            db.data["users"].items(),
-            key=lambda x: len(x[1].get("donations", [])),
-            reverse=True
-        )[:5]
-        
         text = f"""
 📊 *ДЕТАЛЬНАЯ СТАТИСТИКА*
 
@@ -1506,22 +1471,8 @@ async def callback_admin_actions(callback: types.CallbackQuery, state: FSMContex
 🎯 Количество донатов: {today_donations}
 👥 Уникальных донатеров: {len(today_users)}
 
-🏆 *Топ-5 активных пользователей:*
+💎 *Система оплаты:* Telegram Stars
 """
-        
-        for i, (user_id, user_data) in enumerate(top_active, 1):
-            text += f"{i}. @{user_data.get('username', 'Аноним')}\n"
-            text += f"   💰 {user_data['total_donated']:.2f} USDT | 🎯 {len(user_data.get('donations', []))} донатов\n"
-        
-        text += f"\n📊 *Распределение по рангам:*\n"
-        rank_counts = {}
-        for user_data in db.data["users"].values():
-            rank = user_data.get("rank", "Unknown")
-            rank_counts[rank] = rank_counts.get(rank, 0) + 1
-        
-        for rank, count in sorted(rank_counts.items(), key=lambda x: x[1], reverse=True):
-            emoji = next((r["emoji"] for r in RANKS if r["name"] == rank), "❓")
-            text += f"{emoji} {rank}: {count} чел.\n"
         
         await callback.message.edit_caption(
             caption=text,
@@ -1539,18 +1490,15 @@ async def callback_admin_actions(callback: types.CallbackQuery, state: FSMContex
 
 Всего пользователей: {len(users)}
 
-*Топ-10 по донатам:*
+*Топ-5 по донатам:*
 """
         
-        for i, user in enumerate(users_sorted[:10], 1):
+        for i, user in enumerate(users_sorted[:5], 1):
             username = user.get("username", "Аноним")
             join_date = user.get("join_date", "")[:10]
             text += f"{i}. @{username}\n"
             text += f"   💰 {user['total_donated']:.2f} USDT | 🎯 {len(user.get('donations', []))} донатов\n"
-            text += f"   📅 {join_date} | 🔥 {user.get('daily_streak', 0)} дней\n"
-            if user.get("gifts_received"):
-                text += f"   🎁 Подарков: {len(user['gifts_received'])}\n"
-            text += "\n"
+            text += f"   📅 {join_date} | 🔥 {user.get('daily_streak', 0)} дней\n\n"
         
         text += f"📊 *Средний донат на пользователя:* {db.data['total_donated']/len(users):.2f} USDT"
         
@@ -1573,12 +1521,12 @@ async def callback_admin_actions(callback: types.CallbackQuery, state: FSMContex
                 })
         
         # Сортируем по дате
-        recent_donations = sorted(all_donations, key=lambda x: x["date"], reverse=True)[:20]
+        recent_donations = sorted(all_donations, key=lambda x: x["date"], reverse=True)[:10]
         
         text = """
 💰 *ПОСЛЕДНИЕ ДОНАТЫ*
 
-*Последние 20 донатов:*
+*Последние 10 донатов:*
 """
         
         total_last_24h = 0
@@ -1624,13 +1572,6 @@ async def callback_admin_actions(callback: types.CallbackQuery, state: FSMContex
             text += f"   📊 Прогресс: {progress:.1f}% ({db.data['total_donated']:.2f}/{goal['target']})\n"
             text += f"   🎁 Награда: {goal.get('reward', 'Не указана')}{date_achieved}\n\n"
         
-        text += """
-⚙️ *Управление:*
-• /add_goal [сумма] [название] [награда] - добавить цель
-• /remove_goal [номер] - удалить цель
-• /edit_goal [номер] [поле] [значение] - изменить цель
-"""
-        
         await callback.message.edit_caption(
             caption=text,
             parse_mode="Markdown",
@@ -1648,111 +1589,6 @@ async def callback_admin_actions(callback: types.CallbackQuery, state: FSMContex
         )
         await state.set_state(AdminState.waiting_broadcast)
     
-    elif action == "admin_settings":
-        # Настройки
-        text = f"""
-⚙️ *НАСТРОЙКИ БОТА*
-
-*Текущие настройки:*
-💰 Минимальный донат: {db.data['settings']['min_donation']} USDT
-💸 Комиссия проекта: {db.data['settings']['commission']}%
-🔄 Последний сброс: {db.data['settings']['last_reset'][:10]}
-
-*Управление настройками:*
-1. Изменить минимальный донат
-2. Изменить комиссию
-3. Сбросить статистику
-4. Экспорт данных
-
-💡 *Для изменения настроек используйте команды:*
-• /set_mindonation [сумма]
-• /set_commission [процент]
-• /reset_stats - сброс статистики (кроме пользователей)
-• /export_data - экспорт в CSV
-"""
-        
-        await callback.message.edit_caption(
-            caption=text,
-            parse_mode="Markdown",
-            reply_markup=get_admin_keyboard()
-        )
-    
-    elif action == "admin_backup":
-        # Бэкап
-        db.save()
-        backup_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Создаем дополнительный бэкап
-        backup_data = {
-            "backup_time": backup_time,
-            "data": db.data,
-            "total_users": db.data['stats']['total_users'],
-            "total_donated": db.data['total_donated']
-        }
-        
-        backup_filename = f"backup_{backup_time.replace(' ', '_').replace(':', '-')}.json"
-        with open(backup_filename, 'w', encoding='utf-8') as f:
-            json.dump(backup_data, f, indent=4, ensure_ascii=False)
-        
-        text = f"""
-💾 *БЭКАП БАЗЫ ДАННЫХ*
-
-✅ Бэкап успешно создан!
-📅 Время: {backup_time}
-📊 Данные:
-   👥 Пользователей: {db.data['stats']['total_users']}
-   💰 Сумма: {db.data['total_donated']:.2f} USDT
-   🎯 Донатов: {db.data['stats']['total_donations']}
-
-📁 *Файлы бэкапа:*
-• {DB_FILE} (основная база)
-• {BACKUP_FILE} (автобэкап)
-• {backup_filename} (ручной бэкап)
-
-⚠️ *Рекомендации:*
-1. Регулярно скачивайте бэкапы
-2. Храните в безопасном месте
-3. Проверяйте целостность данных
-"""
-        
-        await callback.message.edit_caption(
-            caption=text,
-            parse_mode="Markdown",
-            reply_markup=get_admin_keyboard()
-        )
-    
-    elif action == "admin_clear_cache":
-        # Очистка кэша
-        import shutil
-        if os.path.exists(IMAGE_CACHE_DIR):
-            shutil.rmtree(IMAGE_CACHE_DIR)
-            os.makedirs(IMAGE_CACHE_DIR)
-        
-        text = """
-🗑️ *ОЧИСТКА КЭША*
-
-✅ Кэш изображений успешно очищен!
-
-📁 Удалены:
-• Сгенерированные изображения
-• Временные файлы
-• Кэшированные превью
-
-💡 *Эффект:*
-• Освобождено место на диске
-• Новые изображения будут сгенерированы заново
-• Не влияет на базу данных пользователей
-
-⚠️ *Примечание:* Очистка кэша не удаляет
-важную информацию о пользователях и донатах.
-"""
-        
-        await callback.message.edit_caption(
-            caption=text,
-            parse_mode="Markdown",
-            reply_markup=get_admin_keyboard()
-        )
-    
     await callback.answer()
 
 @dp.message(AdminState.waiting_broadcast)
@@ -1769,285 +1605,49 @@ async def process_broadcast(message: types.Message, state: FSMContext):
     
     # Статистика рассылки
     total_users = db.data['stats']['total_users']
-    sent_count = 0
-    failed_count = 0
     
-    # Отправляем прогресс
-    progress_msg = await message.answer(
+    await message.answer(
         f"📢 *Начинаю рассылку...*\n\n"
         f"👥 Всего пользователей: {total_users}\n"
-        f"✅ Отправлено: 0/{total_users}\n"
-        f"❌ Ошибок: 0\n"
-        f"⏱️ Примерное время: {total_users//10} секунд",
+        f"⏱️ Примерное время: {total_users//10} секунд\n\n"
+        f"*В демо-режиме рассылка не отправляется*",
         parse_mode="Markdown"
     )
-    
-    # Рассылка
-    for user_id_str in list(db.data["users"].keys()):
-        try:
-            user_id = int(user_id_str)
-            await bot.send_message(
-                chat_id=user_id,
-                text=f"📢 *РАССЫЛКА ОТ BANANA NFT*\n\n{broadcast_text}\n\n"
-                     f"💬 С уважением, команда Banana NFT 🍌",
-                parse_mode="Markdown"
-            )
-            sent_count += 1
-            
-            # Обновляем прогресс каждые 10 сообщений
-            if sent_count % 10 == 0:
-                try:
-                    await progress_msg.edit_text(
-                        f"📢 *Рассылка в процессе...*\n\n"
-                        f"👥 Всего пользователей: {total_users}\n"
-                        f"✅ Отправлено: {sent_count}/{total_users}\n"
-                        f"❌ Ошибок: {failed_count}\n"
-                        f"📊 Прогресс: {(sent_count/total_users)*100:.1f}%",
-                        parse_mode="Markdown"
-                    )
-                except:
-                    pass
-            
-            # Задержка чтобы не превысить лимиты Telegram
-            await asyncio.sleep(0.1)
-            
-        except Exception as e:
-            failed_count += 1
-            logger.error(f"Ошибка отправки пользователю {user_id_str}: {e}")
-    
-    # Финальное сообщение
-    await progress_msg.edit_text(
-        f"✅ *РАССЫЛКА ЗАВЕРШЕНА!*\n\n"
-        f"📊 *Результаты:*\n"
-        f"👥 Всего пользователей: {total_users}\n"
-        f"✅ Успешно отправлено: {sent_count}\n"
-        f"❌ Не отправлено: {failed_count}\n"
-        f"📈 Процент доставки: {(sent_count/total_users)*100:.1f}%\n\n"
-        f"💡 *Рекомендации:*\n"
-        f"• Не отправляйте рассылки чаще 1 раза в день\n"
-        f"• Используйте Markdown для форматирования\n"
-        f"• Тестируйте сообщение перед рассылкой",
-        parse_mode="Markdown"
-    )
-    
-    # Логируем рассылку
-    db.data["events"].append({
-        "type": "broadcast",
-        "admin_id": ADMIN_ID,
-        "text_preview": broadcast_text[:100],
-        "sent_count": sent_count,
-        "failed_count": failed_count,
-        "date": datetime.now().isoformat()
-    })
-    db.save()
     
     await state.clear()
 
-# ============ АДМИН КОМАНДЫ ============
-@dp.message(Command("add_goal"))
-async def cmd_add_goal(message: types.Message):
-    """Добавление новой цели"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    try:
-        args = message.text.split(maxsplit=3)
-        if len(args) < 4:
-            await message.answer(
-                "❌ *Использование:* /add_goal [сумма] [название] [награда]\n"
-                "Пример: /add_goal 1000 \"Золотой банан\" \"Все получат NFT\"",
-                parse_mode="Markdown"
-            )
-            return
-        
-        target = float(args[1])
-        name = args[2]
-        reward = args[3]
-        
-        new_goal = {
-            "target": target,
-            "name": name,
-            "reward": reward,
-            "achieved": False
-        }
-        
-        db.data["goals"].append(new_goal)
-        db.save()
-        
-        await message.answer(
-            f"✅ *Цель добавлена!*\n\n"
-            f"🎯 *Название:* {name}\n"
-            f"💰 *Цель:* {target} USDT\n"
-            f"🎁 *Награда:* {reward}\n\n"
-            f"📊 Всего целей: {len(db.data['goals'])}",
-            parse_mode="Markdown"
-        )
-        
-    except ValueError:
-        await message.answer("❌ Ошибка: неверный формат суммы!")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
-
-@dp.message(Command("set_mindonation"))
-async def cmd_set_mindonation(message: types.Message):
-    """Изменение минимального доната"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    try:
-        args = message.text.split()
-        if len(args) < 2:
-            await message.answer(
-                "❌ *Использование:* /set_mindonation [сумма]\n"
-                "Пример: /set_mindonation 0.5",
-                parse_mode="Markdown"
-            )
-            return
-        
-        new_min = float(args[1])
-        if new_min < 0.01:
-            await message.answer("❌ Минимальная сумма: 0.01 USDT")
-            return
-        
-        old_min = db.data['settings']['min_donation']
-        db.data['settings']['min_donation'] = new_min
-        db.data['settings']['last_reset'] = datetime.now().isoformat()
-        db.save()
-        
-        await message.answer(
-            f"✅ *Минимальный донат изменен!*\n\n"
-            f"📊 *Старое значение:* {old_min} USDT\n"
-            f"🎯 *Новое значение:* {new_min} USDT\n\n"
-            f"💡 Изменение вступит в силу для новых донатов.",
-            parse_mode="Markdown"
-        )
-        
-    except ValueError:
-        await message.answer("❌ Ошибка: неверный формат суммы!")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
-
-@dp.message(Command("reset_stats"))
-async def cmd_reset_stats(message: types.Message):
-    """Сброс статистики"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    # Создаем подтверждение
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Да, сбросить", callback_data="confirm_reset"),
-            InlineKeyboardButton(text="❌ Нет, отмена", callback_data="cancel_reset")
-        ]
-    ])
-    
-    await message.answer(
-        "⚠️ *ПОДТВЕРЖДЕНИЕ СБРОСА СТАТИСТИКИ*\n\n"
-        "Вы уверены что хотите сбросить статистику?\n\n"
-        "🗑️ *Будет удалено:*\n"
-        "• Общая сумма донатов\n"
-        "• Количество донатов\n"
-        "• Рекордный донат\n"
-        "• Время последнего доната\n\n"
-        "👥 *НЕ будет удалено:*\n"
-        "• Пользователи и их данные\n"
-        "• Личная история донатов\n"
-        "• Ранги и уровни\n"
-        "• Полученные подарки\n\n"
-        "❗ *Это действие нельзя отменить!*",
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query(F.data == "confirm_reset")
-async def callback_confirm_reset(callback: types.CallbackQuery):
-    """Подтверждение сброса статистики"""
-    if callback.from_user.id != ADMIN_ID:
-        return
-    
-    # Сохраняем старые значения для лога
-    old_total = db.data['total_donated']
-    old_donations = db.data['stats']['total_donations']
-    old_biggest = db.data['stats']['biggest_donation']
-    
-    # Сбрасываем статистику
-    db.data['total_donated'] = 0
-    db.data['stats']['total_donations'] = 0
-    db.data['stats']['biggest_donation'] = 0
-    db.data['stats']['last_donation_time'] = None
-    db.data['settings']['last_reset'] = datetime.now().isoformat()
-    
-    # Сохраняем событие
-    db.data["events"].append({
-        "type": "stats_reset",
-        "admin_id": ADMIN_ID,
-        "old_total": old_total,
-        "old_donations": old_donations,
-        "old_biggest": old_biggest,
-        "date": datetime.now().isoformat()
-    })
-    
-    db.save()
-    
-    await callback.message.edit_text(
-        f"✅ *СТАТИСТИКА СБРОШЕНА!*\n\n"
-        f"📊 *Старые значения:*\n"
-        f"💰 Общая сумма: {old_total:.2f} USDT\n"
-        f"🎯 Количество донатов: {old_donations}\n"
-        f"🏆 Рекордный донат: {old_biggest:.2f} USDT\n\n"
-        f"🔄 *Новые значения:*\n"
-        f"💰 Общая сумма: 0 USDT\n"
-        f"🎯 Количество донатов: 0\n"
-        f"🏆 Рекордный донат: 0 USDT\n\n"
-        f"📅 Время сброса: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"👤 Администратор: @{callback.from_user.username or 'N/A'}",
-        parse_mode="Markdown"
-    )
-    
-    await callback.answer()
-
-@dp.callback_query(F.data == "cancel_reset")
-async def callback_cancel_reset(callback: types.CallbackQuery):
-    """Отмена сброса статистики"""
-    await callback.message.edit_text(
-        "❌ *СБРОС СТАТИСТИКИ ОТМЕНЕН*\n\n"
-        "Статистика проекта не была изменена.",
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
 # ============ ОБРАБОТКА ОШИБОК ============
 @dp.errors()
-async def errors_handler(update: types.Update, exception: Exception):
+async def errors_handler(event: types.ErrorEvent):
     """Глобальный обработчик ошибок"""
-    logger.error(f"Ошибка: {exception}", exc_info=True)
+    logger.error(f"Ошибка: {event.exception}", exc_info=True)
     
     # Пытаемся отправить сообщение об ошибке пользователю
     try:
-        if update.message:
-            await update.message.answer(
+        if hasattr(event.update, 'message') and event.update.message:
+            await event.update.message.answer(
                 "😕 *Упс! Произошла ошибка*\n\n"
                 "Наша команда уже работает над решением проблемы.\n"
                 "Попробуйте еще раз через несколько минут.\n\n"
                 "💡 Если ошибка повторяется, напишите @support",
                 parse_mode="Markdown"
             )
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
     
     # Отправляем уведомление админу
     try:
-        error_text = str(exception)[:1000]
+        error_text = str(event.exception)[:1000]
         await bot.send_message(
             ADMIN_ID,
             f"⚠️ *ОШИБКА В БОТЕ*\n\n"
             f"🕐 Время: {datetime.now().strftime('%H:%M:%S')}\n"
             f"❌ Ошибка: {error_text}\n"
-            f"👤 Пользователь: {update.message.from_user.id if update.message else 'N/A'}",
+            f"📊 Тип: {type(event.exception).__name__}",
             parse_mode="Markdown"
         )
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Не удалось отправить уведомление админу: {e}")
     
     return True
 
@@ -2064,10 +1664,6 @@ async def main():
         print("🔄 Замените TELEGRAM_BOT_TOKEN в коде")
         return
     
-    if CRYPTO_BOT_TOKEN == "ВАШ_КРИПТОБОТ_ТОКЕН":
-        print("⚠️ ВНИМАНИЕ: Не установлен CryptoBot токен")
-        print("ℹ️ Донаты работать не будут, но бот запустится")
-    
     # Проверка базы данных
     print("📁 Проверка базы данных...")
     if not os.path.exists(DB_FILE):
@@ -2081,7 +1677,7 @@ async def main():
         me = await bot.get_me()
         print(f"✅ Бот запущен: @{me.username} (ID: {me.id})")
         print(f"👑 Админ ID: {ADMIN_ID}")
-        print(f"💰 CryptoBot: {'✅' if CRYPTO_BOT_TOKEN != 'ВАШ_КРИПТОБОТ_ТОКЕН' else '❌'}")
+        print(f"💎 Платежная система: Telegram Stars (@donate)")
         print("=" * 50)
         print("📢 Бот готов к работе! Отправьте /start")
         print("=" * 50)
@@ -2092,7 +1688,6 @@ async def main():
         print(f"❌ Ошибка запуска бота: {e}")
     finally:
         # Закрытие сессий
-        await crypto_bot.close()
         await bot.session.close()
         print("👋 Бот остановлен")
 
