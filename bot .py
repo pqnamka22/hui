@@ -1,245 +1,675 @@
+#!/usr/bin/env python3
+"""
+🍌 BANANA NFT BOT v1.0
+Полный бот с системой донатов, рейтингом и красивыми картинками
+"""
+
 import asyncio
 import logging
-from datetime import datetime
+import json
+import os
+import io
+import random
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.types import (
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton, 
+    FSInputFile,
+    BufferedInputFile
+)
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
-import textwrap
-import io
-import json
-import os
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 # ============ КОНФИГУРАЦИЯ ============
-TELEGRAM_BOT_TOKEN = "8536282991:AAFDzgiXbhJG-GSuKci04oLy3Ny4bpdD9Yw"  # 🔴 ЗАМЕНИТЕ!
-CRYPTO_BOT_TOKEN = "522930:AAl0Ojn6IiEeAZH2NP2nZ4ZjUgBR6getqjL"  # 🔴 ЗАМЕНИТЕ!
-ADMIN_ID = 123456789  # 🔴 ВАШ ID в Telegram
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# База данных (для демо - JSON файл, в продакшене используйте PostgreSQL)
-DB_FILE = "database.json"
+# 🔴🔴🔴 ЗАМЕНИТЕ ЭТИ ТОКЕНЫ! 🔴🔴🔴
+TELEGRAM_BOT_TOKEN = "8536282991:AAHUyTx0r7Q03bwDRokvogbmJAIbkAnYVpM"
+CRYPTO_BOT_TOKEN = "523051:AAkDAQM5oAnTCxzyO5GCJMsSNvCUeqYXFKs"
+ADMIN_ID = 6185460659  # Ваш Telegram ID
 
-# Инициализация бота
+# Константы
+DB_FILE = "banana_db.json"
+BACKUP_FILE = "banana_backup.json"
+IMAGE_CACHE_DIR = "image_cache"
+os.makedirs(IMAGE_CACHE_DIR, exist_ok=True)
+
+# Цветовая палитра Banana NFT
+COLORS = {
+    "banana_yellow": (255, 225, 53),
+    "gold": (255, 215, 0),
+    "dark_gold": (184, 134, 11),
+    "brown": (139, 69, 19),
+    "black": (0, 0, 0),
+    "white": (255, 255, 255),
+    "gradient_start": (255, 255, 150),
+    "gradient_end": (255, 200, 50)
+}
+
+# Система рангов
+RANKS = [
+    {"min": 0, "name": "🍌 Желтый банан", "emoji": "🍌", "color": "#FFD700"},
+    {"min": 10, "name": "💰 Banana Collector", "emoji": "💰", "color": "#C0C0C0"},
+    {"min": 50, "name": "🌟 Banana Star", "emoji": "🌟", "color": "#87CEEB"},
+    {"min": 100, "name": "🏆 Banana Champion", "emoji": "🏆", "color": "#FFA500"},
+    {"min": 500, "name": "👑 Banana King", "emoji": "👑", "color": "#FFD700"},
+    {"min": 1000, "name": "🚀 Banana God", "emoji": "🚀", "color": "#9370DB"},
+    {"min": 5000, "name": "💎 Diamond Banana", "emoji": "💎", "color": "#00FFFF"},
+    {"min": 10000, "name": "✨ Legendary Banana", "emoji": "✨", "color": "#FF00FF"}
+]
+
+# Подарки за донаты
+GIFTS = {
+    10: {"name": "🍌 Банановый эмодзи", "description": "Эксклюзивный эмодзи в чате"},
+    50: {"name": "🎨 Стикерпак", "description": "Набор стикеров Banana Gang"},
+    100: {"name": "🌟 VIP статус", "description": "VIP на 30 дней + золотое имя"},
+    500: {"name": "👑 Персональный NFT", "description": "Уникальный Banana NFT"},
+    1000: {"name": "💎 Diamond Member", "description": "Пожизненный VIP + доход 1%"},
+    5000: {"name": "🚀 Сооснователь", "description": "Управление проектом + токены"}
+}
+
+# Цели проекта
+GOALS = [
+    {"target": 1000, "name": "Golden Banana NFT", "reward": "Все участники получат NFT"},
+    {"target": 5000, "name": "Banana Token Launch", "reward": "Запуск $BNFT токена"},
+    {"target": 10000, "name": "Marketplace Release", "reward": "Banana NFT Marketplace"},
+    {"target": 50000, "name": "Mobile Game", "reward": "Игра Banana Run"}
+]
+
+# ============ ИНИЦИАЛИЗАЦИЯ ============
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # ============ БАЗА ДАННЫХ ============
-def load_db():
-    try:
-        with open(DB_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return {"users": {}, "total_donated": 0, "top_donations": []}
-
-def save_db(data):
-    with open(DB_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
-
-def get_user(user_id, username=""):
-    db = load_db()
-    if str(user_id) not in db["users"]:
-        db["users"][str(user_id)] = {
-            "username": username,
+class Database:
+    def __init__(self, filename=DB_FILE):
+        self.filename = filename
+        self.data = self.load()
+    
+    def load(self):
+        """Загрузка базы данных"""
+        try:
+            if os.path.exists(self.filename):
+                with open(self.filename, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.error(f"Ошибка загрузки БД: {e}")
+        
+        # База по умолчанию
+        default_db = {
+            "users": {},
             "total_donated": 0,
-            "donations": [],
-            "rank": "🍌 Новый банан",
-            "join_date": datetime.now().isoformat(),
-            "level": 1
+            "top_donations": [],
+            "goals": GOALS.copy(),
+            "settings": {
+                "min_donation": 0.1,
+                "commission": 2.0,
+                "last_reset": datetime.now().isoformat()
+            },
+            "events": [],
+            "stats": {
+                "total_users": 0,
+                "total_donations": 0,
+                "biggest_donation": 0,
+                "last_donation_time": None
+            }
         }
-        save_db(db)
-    return db["users"][str(user_id)]
+        return default_db
+    
+    def save(self):
+        """Сохранение базы данных"""
+        try:
+            # Создаем бэкап
+            if os.path.exists(self.filename):
+                import shutil
+                shutil.copy2(self.filename, BACKUP_FILE)
+            
+            with open(self.filename, 'w', encoding='utf-8') as f:
+                json.dump(self.data, f, indent=4, ensure_ascii=False)
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка сохранения БД: {e}")
+            return False
+    
+    def get_user(self, user_id: int, username: str = "") -> dict:
+        """Получение или создание пользователя"""
+        user_id_str = str(user_id)
+        
+        if user_id_str not in self.data["users"]:
+            self.data["users"][user_id_str] = {
+                "id": user_id,
+                "username": username or "",
+                "first_name": "",
+                "total_donated": 0.0,
+                "donations": [],
+                "rank": RANKS[0]["name"],
+                "level": 1,
+                "xp": 0,
+                "gifts_received": [],
+                "join_date": datetime.now().isoformat(),
+                "last_active": datetime.now().isoformat(),
+                "referrals": [],
+                "daily_streak": 0,
+                "last_daily": None,
+                "achievements": []
+            }
+            self.data["stats"]["total_users"] = len(self.data["users"])
+            self.save()
+        
+        return self.data["users"][user_id_str]
+    
+    def update_user(self, user_id: int, amount: float, username: str = "") -> Tuple[str, int]:
+        """Обновление данных пользователя после доната"""
+        user = self.get_user(user_id, username)
+        user_id_str = str(user_id)
+        
+        # Обновляем основную информацию
+        user["total_donated"] = round(user["total_donated"] + amount, 2)
+        user["last_active"] = datetime.now().isoformat()
+        
+        # Добавляем донат в историю
+        donation_record = {
+            "amount": amount,
+            "date": datetime.now().isoformat(),
+            "status": "completed"
+        }
+        user["donations"].append(donation_record)
+        
+        # Обновляем XP и уровень
+        xp_gained = int(amount * 10)
+        user["xp"] += xp_gained
+        user["level"] = user["xp"] // 100 + 1
+        
+        # Обновляем ранг
+        new_rank = self.calculate_rank(user["total_donated"])
+        user["rank"] = new_rank
+        
+        # Обновляем глобальную статистику
+        self.data["total_donated"] = round(self.data["total_donated"] + amount, 2)
+        self.data["stats"]["total_donations"] += 1
+        
+        if amount > self.data["stats"]["biggest_donation"]:
+            self.data["stats"]["biggest_donation"] = amount
+        
+        self.data["stats"]["last_donation_time"] = datetime.now().isoformat()
+        
+        # Добавляем в топ донатов
+        top_donation = {
+            "user_id": user_id,
+            "username": username,
+            "amount": amount,
+            "date": datetime.now().isoformat(),
+            "rank": new_rank
+        }
+        self.data["top_donations"].append(top_donation)
+        
+        # Сортируем топ (первые 100)
+        self.data["top_donations"] = sorted(
+            self.data["top_donations"],
+            key=lambda x: x["amount"],
+            reverse=True
+        )[:100]
+        
+        # Проверяем достижение целей
+        self.check_goals(amount)
+        
+        # Сохраняем изменения
+        self.save()
+        
+        return new_rank, user["level"]
+    
+    def calculate_rank(self, total_donated: float) -> str:
+        """Вычисление ранга пользователя"""
+        for rank in reversed(RANKS):
+            if total_donated >= rank["min"]:
+                return rank["name"]
+        return RANKS[0]["name"]
+    
+    def check_goals(self, amount: float):
+        """Проверка достижения целей"""
+        for goal in self.data["goals"]:
+            if self.data["total_donated"] >= goal["target"] and not goal.get("achieved"):
+                goal["achieved"] = True
+                goal["achieved_date"] = datetime.now().isoformat()
+                
+                # Добавляем событие
+                event = {
+                    "type": "goal_achieved",
+                    "goal": goal["name"],
+                    "target": goal["target"],
+                    "date": datetime.now().isoformat(),
+                    "total": self.data["total_donated"]
+                }
+                self.data["events"].append(event)
+    
+    def get_top_users(self, limit: int = 10) -> List[dict]:
+        """Получение топа пользователей"""
+        users_list = list(self.data["users"].values())
+        sorted_users = sorted(users_list, key=lambda x: x["total_donated"], reverse=True)
+        return sorted_users[:limit]
+    
+    def get_user_position(self, user_id: int) -> int:
+        """Получение позиции пользователя в топе"""
+        top_users = self.get_top_users(len(self.data["users"]))
+        for i, user in enumerate(top_users, 1):
+            if user["id"] == user_id:
+                return i
+        return len(top_users) + 1
+    
+    def add_gift(self, user_id: int, gift_tier: int):
+        """Добавление подарка пользователю"""
+        user = self.get_user(user_id)
+        gift_info = GIFTS.get(gift_tier)
+        
+        if gift_info and gift_tier not in user["gifts_received"]:
+            user["gifts_received"].append({
+                "tier": gift_tier,
+                "name": gift_info["name"],
+                "date": datetime.now().isoformat()
+            })
+            self.save()
+            return gift_info
+        
+        return None
+    
+    def get_daily_bonus(self, user_id: int) -> Tuple[bool, int]:
+        """Получение ежедневного бонуса"""
+        user = self.get_user(user_id)
+        today = datetime.now().date().isoformat()
+        
+        if user["last_daily"] == today:
+            return False, 0  # Уже получал сегодня
+        
+        # Вычисляем бонус
+        streak = user["daily_streak"] + 1
+        bonus_xp = min(streak * 10, 100)  # Макс 100 XP
+        
+        # Обновляем данные
+        user["daily_streak"] = streak
+        user["last_daily"] = today
+        user["xp"] += bonus_xp
+        self.save()
+        
+        return True, bonus_xp
 
-def update_user(user_id, amount, username=""):
-    db = load_db()
-    user_id_str = str(user_id)
-    
-    if user_id_str not in db["users"]:
-        get_user(user_id, username)
-    
-    db["users"][user_id_str]["total_donated"] += amount
-    db["users"][user_id_str]["donations"].append({
-        "amount": amount,
-        "date": datetime.now().isoformat()
-    })
-    db["users"][user_id_str]["username"] = username
-    
-    # Обновляем топ донатов
-    donation_entry = {
-        "user_id": user_id,
-        "username": username,
-        "amount": amount,
-        "date": datetime.now().isoformat()
-    }
-    db["top_donations"].append(donation_entry)
-    db["top_donations"] = sorted(db["top_donations"], 
-                                 key=lambda x: x["amount"], 
-                                 reverse=True)[:100]
-    
-    db["total_donated"] += amount
-    save_db(db)
-    
-    # Обновляем ранг
-    return update_rank(user_id_str)
-
-def update_rank(user_id_str):
-    db = load_db()
-    total = db["users"][user_id_str]["total_donated"]
-    
-    ranks = {
-        0: "🍌 Желтый банан",
-        10: "💰 Banana Collector",
-        50: "🌟 Banana Star",
-        100: "🏆 Banana Champion",
-        500: "👑 Banana King",
-        1000: "🚀 Banana God",
-        5000: "💎 Diamond Banana"
-    }
-    
-    current_rank = "🍌 Желтый банан"
-    for amount, rank in sorted(ranks.items(), reverse=True):
-        if total >= amount:
-            current_rank = rank
-            break
-    
-    db["users"][user_id_str]["rank"] = current_rank
-    
-    # Уровень (каждые 10 USDT)
-    db["users"][user_id_str]["level"] = min(100, total // 10 + 1)
-    
-    save_db(db)
-    return current_rank, db["users"][user_id_str]["level"]
+# Инициализация базы данных
+db = Database()
 
 # ============ CRYPTOBOT API ============
-class CryptoBotAPI:
-    def __init__(self, token):
+class CryptoBot:
+    def __init__(self, token: str):
         self.token = token
         self.base_url = "https://pay.crypt.bot/api"
+        self.session = None
     
-    async def create_invoice(self, amount, currency="USDT", description=""):
+    async def ensure_session(self):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+    
+    async def create_invoice(self, amount: float, currency: str = "USDT", 
+                           description: str = "", user_id: int = None) -> dict:
+        """Создание счета на оплату"""
+        await self.ensure_session()
+        
         headers = {
             "Crypto-Pay-API-Token": self.token,
             "Content-Type": "application/json"
         }
         
         payload = {
-            "amount": amount,
+            "amount": str(amount),
             "asset": currency,
-            "description": description,
-            "hidden_message": "Спасибо за донат! 🍌",
+            "description": description or f"Donation to Banana NFT",
+            "hidden_message": "🎉 Спасибо за поддержку Banana NFT!",
             "paid_btn_url": "https://t.me/banananftbot",
             "paid_btn_text": "Вернуться в бота",
-            "payload": str(datetime.now().timestamp()),
-            "allow_comments": False
+            "payload": str(user_id) if user_id else "banana_nft",
+            "allow_comments": True,
+            "expires_in": 3600  # 1 час
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{self.base_url}/createInvoice", 
-                                  json=payload, 
-                                  headers=headers) as response:
+        try:
+            async with self.session.post(
+                f"{self.base_url}/createInvoice",
+                json=payload,
+                headers=headers
+            ) as response:
                 data = await response.json()
                 
                 if data.get("ok"):
                     invoice = data["result"]
                     return {
+                        "success": True,
                         "invoice_id": invoice["invoice_id"],
                         "pay_url": invoice["pay_url"],
                         "amount": invoice["amount"],
-                        "status": invoice["status"]
+                        "status": invoice["status"],
+                        "expires_at": invoice.get("expires_at")
                     }
                 else:
-                    raise Exception(f"CryptoBot error: {data.get('error')}")
+                    error = data.get("error", {})
+                    return {
+                        "success": False,
+                        "error": error.get("name", "Unknown error"),
+                        "code": error.get("code")
+                    }
+        except Exception as e:
+            logger.error(f"CryptoBot error: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    async def get_invoice(self, invoice_id: str) -> dict:
+        """Получение информации о счете"""
+        await self.ensure_session()
+        
+        headers = {
+            "Crypto-Pay-API-Token": self.token
+        }
+        
+        try:
+            async with self.session.get(
+                f"{self.base_url}/getInvoices?invoice_ids={invoice_id}",
+                headers=headers
+            ) as response:
+                data = await response.json()
+                
+                if data.get("ok") and data.get("result", {}).get("items"):
+                    invoice = data["result"]["items"][0]
+                    return {
+                        "success": True,
+                        "status": invoice["status"],
+                        "paid_at": invoice.get("paid_at"),
+                        "amount": invoice.get("amount")
+                    }
+                return {"success": False, "error": "Invoice not found"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def close(self):
+        """Закрытие сессии"""
+        if self.session:
+            await self.session.close()
 
-crypto_bot = CryptoBotAPI(CRYPTO_BOT_TOKEN)
+# Инициализация CryptoBot
+crypto_bot = CryptoBot(CRYPTO_BOT_TOKEN)
 
-# ============ ГЕНЕРАЦИЯ КАРТИНОК ============
-def generate_donation_image(username, amount, rank):
-    # Создаем изображение
-    width, height = 800, 400
+# ============ ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ============
+class ImageGenerator:
+    @staticmethod
+    def create_gradient(width: int, height: int, start_color: Tuple, end_color: Tuple) -> Image.Image:
+        """Создание градиентного фона"""
+        base = Image.new('RGB', (width, height), start_color)
+        top = Image.new('RGB', (width, height), end_color)
+        mask = Image.new('L', (width, height))
+        mask_data = []
+        
+        for y in range(height):
+            for x in range(width):
+                mask_data.append(int(255 * (x / width * 0.5 + y / height * 0.5)))
+        
+        mask.putdata(mask_data)
+        base.paste(top, (0, 0), mask)
+        return base
     
-    # Фон с градиентом
-    img = Image.new('RGB', (width, height), color='black')
-    draw = ImageDraw.Draw(img)
+    @staticmethod
+    def draw_banana(draw: ImageDraw, x: int, y: int, size: int, color: Tuple):
+        """Рисование стилизованного банана"""
+        # Основная дуга банана
+        draw.ellipse([x, y, x + size, y + size], outline=color, width=3)
+        # Концы банана
+        draw.ellipse([x + size//4, y + size//4, x + 3*size//4, y + 3*size//4], 
+                    outline=color, width=2)
     
-    # Градиент фон
-    for i in range(height):
-        r = int(255 * (i / height))
-        g = int(200 * (i / height))
-        b = 50
-        draw.line([(0, i), (width, i)], fill=(r, g, b))
+    @staticmethod
+    def generate_welcome_image(username: str = "Друг") -> io.BytesIO:
+        """Генерация приветственного изображения"""
+        width, height = 800, 400
+        
+        # Создаем градиентный фон
+        img = ImageGenerator.create_gradient(
+            width, height,
+            COLORS["gradient_start"],
+            COLORS["gradient_end"]
+        )
+        draw = ImageDraw.Draw(img)
+        
+        # Рисуем бананы на фоне
+        for i in range(8):
+            x = random.randint(0, width - 100)
+            y = random.randint(0, height - 100)
+            size = random.randint(30, 70)
+            color = random.choice([COLORS["gold"], COLORS["banana_yellow"]])
+            ImageGenerator.draw_banana(draw, x, y, size, color)
+        
+        # Добавляем размытие фона
+        img = img.filter(ImageFilter.GaussianBlur(radius=1))
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            # Пробуем загрузить шрифты
+            title_font = ImageFont.truetype("arialbd.ttf", 60)
+            name_font = ImageFont.truetype("arialbd.ttf", 40)
+            subtitle_font = ImageFont.truetype("arial.ttf", 28)
+        except:
+            # Используем стандартные шрифты
+            title_font = ImageFont.load_default()
+            name_font = ImageFont.load_default()
+            subtitle_font = ImageFont.load_default()
+        
+        # Текст
+        title = "🍌 BANANA NFT"
+        draw.text((width//2, 100), title, font=title_font, 
+                 fill=COLORS["dark_gold"], anchor="mm", stroke_width=2, stroke_fill=COLORS["black"])
+        
+        welcome_text = f"Добро пожаловать, {username}!"
+        draw.text((width//2, 180), welcome_text, font=name_font,
+                 fill=COLORS["white"], anchor="mm")
+        
+        subtitle = "Самый сочный NFT проект в Telegram!"
+        draw.text((width//2, 240), subtitle, font=subtitle_font,
+                 fill=COLORS["gold"], anchor="mm")
+        
+        footer = "banananftbot"
+        draw.text((width//2, 350), footer, font=subtitle_font,
+                 fill=COLORS["brown"], anchor="mm")
+        
+        # Сохраняем в буфер
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG', optimize=True, quality=95)
+        buffer.seek(0)
+        return buffer
     
-    # Добавляем бананы на фон
-    try:
-        banana = Image.open("banana.png") if os.path.exists("banana.png") else None
-        if banana:
-            banana = banana.resize((100, 100))
-            for x in range(0, width, 150):
-                for y in range(0, height, 150):
-                    img.paste(banana, (x, y), banana)
-    except:
-        pass
+    @staticmethod
+    def generate_donation_image(username: str, amount: float, rank: str) -> io.BytesIO:
+        """Генерация изображения для шаринга достижения"""
+        width, height = 800, 400
+        
+        # Создаем золотой фон
+        img = ImageGenerator.create_gradient(
+            width, height,
+            (255, 240, 150),
+            (255, 200, 50)
+        )
+        
+        # Добавляем эффект сияния
+        glow = Image.new('RGBA', (width, height), (255, 255, 255, 0))
+        glow_draw = ImageDraw.Draw(glow)
+        
+        for i in range(5):
+            radius = 200 + i * 20
+            alpha = 30 - i * 5
+            glow_draw.ellipse(
+                [(width//2 - radius, height//2 - radius),
+                 (width//2 + radius, height//2 + radius)],
+                fill=(255, 255, 255, alpha)
+            )
+        
+        img = Image.alpha_composite(img.convert('RGBA'), glow).convert('RGB')
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            # Шрифты
+            title_font = ImageFont.truetype("arialbd.ttf", 48)
+            amount_font = ImageFont.truetype("arialbd.ttf", 72)
+            name_font = ImageFont.truetype("arial.ttf", 36)
+            rank_font = ImageFont.truetype("arial.ttf", 28)
+        except:
+            title_font = ImageFont.load_default()
+            amount_font = ImageFont.load_default()
+            name_font = ImageFont.load_default()
+            rank_font = ImageFont.load_default()
+        
+        # Заголовок
+        title = "🏆 НОВЫЙ РЕКОРД!"
+        draw.text((width//2, 60), title, font=title_font,
+                 fill=COLORS["dark_gold"], anchor="mm")
+        
+        # Имя пользователя
+        user_display = f"@{username}" if username else "Анонимный банан"
+        draw.text((width//2, 130), user_display, font=name_font,
+                 fill=COLORS["white"], anchor="mm")
+        
+        # Сумма доната
+        amount_text = f"{amount:.2f} USDT"
+        draw.text((width//2, 200), amount_text, font=amount_font,
+                 fill=COLORS["gold"], anchor="mm", stroke_width=3, stroke_fill=COLORS["dark_gold"])
+        
+        # Ранг
+        draw.text((width//2, 280), rank, font=rank_font,
+                 fill=COLORS["brown"], anchor="mm")
+        
+        # Подпись
+        signature = "🍌 Banana NFT | banananftbot"
+        draw.text((width//2, 340), signature, font=rank_font,
+                 fill=COLORS["white"], anchor="mm")
+        
+        # Добавляем декоративные элементы
+        for i, emoji in enumerate(["🍌", "💰", "🏆", "🌟", "👑"]):
+            x = 100 + i * 150
+            y = 360
+            try:
+                # Пробуем использовать эмодзи как текст
+                draw.text((x, y), emoji, font=ImageFont.load_default(),
+                         fill=COLORS["gold"], anchor="mm")
+            except:
+                pass
+        
+        # Сохраняем в буфер
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG', optimize=True, quality=95)
+        buffer.seek(0)
+        return buffer
     
-    # Размываем фон бананов
-    img = img.filter(ImageFilter.GaussianBlur(radius=2))
-    draw = ImageDraw.Draw(img)
-    
-    try:
-        # Загружаем шрифты
-        title_font = ImageFont.truetype("arialbd.ttf", 48)
-        text_font = ImageFont.truetype("arial.ttf", 32)
-        amount_font = ImageFont.truetype("arialbd.ttf", 64)
-    except:
-        title_font = ImageFont.load_default()
-        text_font = ImageFont.load_default()
-        amount_font = ImageFont.load_default()
-    
-    # Заголовок
-    draw.text((width//2, 50), "BANANA NFT 🍌", 
-              font=title_font, fill=(255, 215, 0), anchor="mm")
-    
-    # Имя пользователя
-    draw.text((width//2, 120), f"@{username}", 
-              font=text_font, fill=(255, 255, 255), anchor="mm")
-    
-    # Сумма доната
-    draw.text((width//2, 190), f"{amount} USDT", 
-              font=amount_font, fill=(255, 215, 0), anchor="mm")
-    
-    # Ранг
-    draw.text((width//2, 260), rank, 
-              font=text_font, fill=(200, 200, 200), anchor="mm")
-    
-    # Нижний текст
-    draw.text((width//2, 330), "Спасибо за поддержку! 💛", 
-              font=text_font, fill=(255, 255, 255), anchor="mm")
-    
-    # Сохраняем в буфер
-    img_buffer = io.BytesIO()
-    img.save(img_buffer, format='PNG')
-    img_buffer.seek(0)
-    
-    return img_buffer
-
-# ============ STATES ============
-class DonationState(StatesGroup):
-    waiting_for_amount = State()
-    processing_payment = State()
+    @staticmethod
+    def generate_top_image(top_users: List[dict], total_donated: float) -> io.BytesIO:
+        """Генерация изображения топа"""
+        width, height = 800, 600
+        
+        # Фон
+        img = Image.new('RGB', (width, height), COLORS["black"])
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            title_font = ImageFont.truetype("arialbd.ttf", 48)
+            header_font = ImageFont.truetype("arialbd.ttf", 32)
+            user_font = ImageFont.truetype("arial.ttf", 24)
+            total_font = ImageFont.truetype("arialbd.ttf", 36)
+        except:
+            title_font = ImageFont.load_default()
+            header_font = ImageFont.load_default()
+            user_font = ImageFont.load_default()
+            total_font = ImageFont.load_default()
+        
+        # Заголовок
+        draw.text((width//2, 50), "🏆 ТОП ДОНАТЕРОВ 🍌", font=title_font,
+                 fill=COLORS["gold"], anchor="mm")
+        
+        # Заголовки таблицы
+        headers = ["#", "Имя", "Сумма", "Ранг"]
+        header_y = 120
+        col_widths = [50, 300, 200, 250]
+        
+        for i, header in enumerate(headers):
+            x = sum(col_widths[:i]) + col_widths[i]//2
+            draw.text((x, header_y), header, font=header_font,
+                     fill=COLORS["banana_yellow"], anchor="mm")
+        
+        # Пользователи
+        for idx, user in enumerate(top_users[:10], 1):
+            y = header_y + 50 + idx * 40
+            
+            # Медальки для топ-3
+            medal = ""
+            if idx == 1: medal = "🥇"
+            elif idx == 2: medal = "🥈"
+            elif idx == 3: medal = "🥉"
+            
+            # Данные пользователя
+            username = user.get("username", "Аноним")[:15]
+            amount = f"{user['total_donated']:.2f} USDT"
+            rank = user.get("rank", "🍌 Банан")[:20]
+            
+            # Рисуем строку
+            cols = [
+                f"{medal} {idx}" if medal else str(idx),
+                f"@{username}" if username != "Аноним" else username,
+                amount,
+                rank
+            ]
+            
+            for i, text in enumerate(cols):
+                x = sum(col_widths[:i]) + col_widths[i]//2
+                color = COLORS["gold"] if idx <= 3 else COLORS["white"]
+                draw.text((x, y), text, font=user_font,
+                         fill=color, anchor="mm")
+        
+        # Итоговая сумма
+        total_text = f"Всего собрано: {total_donated:.2f} USDT"
+        draw.text((width//2, height - 50), total_text, font=total_font,
+                 fill=COLORS["banana_yellow"], anchor="mm")
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG')
+        buffer.seek(0)
+        return buffer
 
 # ============ КЛАВИАТУРЫ ============
-def main_menu():
-    keyboard = [
-        [InlineKeyboardButton(text="💰 Донат", callback_data="donate")],
-        [InlineKeyboardButton(text="🏆 Топ донатеров", callback_data="top")],
-        [InlineKeyboardButton(text="📊 Моя статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="🎁 Подарки", callback_data="gifts")],
-        [InlineKeyboardButton(text="🌟 Поделиться", callback_data="share")]
+def get_main_menu() -> InlineKeyboardMarkup:
+    """Главное меню"""
+    buttons = [
+        [
+            InlineKeyboardButton(text="💰 Донат", callback_data="donate"),
+            InlineKeyboardButton(text="🏆 Топ", callback_data="top")
+        ],
+        [
+            InlineKeyboardButton(text="📊 Статистика", callback_data="stats"),
+            InlineKeyboardButton(text="🎁 Подарки", callback_data="gifts")
+        ],
+        [
+            InlineKeyboardButton(text="🌟 Поделиться", callback_data="share"),
+            InlineKeyboardButton(text="⚡ Ежедневный бонус", callback_data="daily")
+        ],
+        [
+            InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about"),
+            InlineKeyboardButton(text="👑 Админ" if ADMIN_ID else "⚙️ Настройки", 
+                               callback_data="admin")
+        ]
     ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def donate_keyboard():
-    keyboard = [
+def get_donate_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для донатов"""
+    buttons = [
         [
             InlineKeyboardButton(text="5 USDT 🍌", callback_data="donate_5"),
             InlineKeyboardButton(text="10 USDT 💰", callback_data="donate_10"),
@@ -248,463 +678,1409 @@ def donate_keyboard():
         [
             InlineKeyboardButton(text="50 USDT 🏆", callback_data="donate_50"),
             InlineKeyboardButton(text="100 USDT 👑", callback_data="donate_100"),
-            InlineKeyboardButton(text="Другая сумма", callback_data="donate_custom")
+            InlineKeyboardButton(text="500 USDT 🚀", callback_data="donate_500")
         ],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
+        [
+            InlineKeyboardButton(text="🎯 Другая сумма", callback_data="donate_custom"),
+            InlineKeyboardButton(text="📈 Мои донаты", callback_data="my_donations")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="back")
+        ]
     ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def payment_keyboard(pay_url):
-    keyboard = [
-        [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
-        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_payment")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
+def get_payment_keyboard(pay_url: str, invoice_id: str) -> InlineKeyboardMarkup:
+    """Клавиатура для оплаты"""
+    buttons = [
+        [
+            InlineKeyboardButton(text="💳 Оплатить сейчас", url=pay_url)
+        ],
+        [
+            InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"check_{invoice_id}"),
+            InlineKeyboardButton(text="🔄 Обновить", callback_data=f"refresh_{invoice_id}")
+        ],
+        [
+            InlineKeyboardButton(text="🚫 Отменить", callback_data="cancel_payment"),
+            InlineKeyboardButton(text="🆘 Помощь", callback_data="help_payment")
+        ]
     ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def share_keyboard():
-    keyboard = [
-        [InlineKeyboardButton(text="📱 Поделиться в Telegram", 
-                             url="https://t.me/share/url?url=https://t.me/banananftbot&text=Я+только+что+задонатил+в+BANANA+NFT+бот!+🍌")],
-        [InlineKeyboardButton(text="🎨 Сгенерировать картинку", callback_data="generate_image")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
+def get_share_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура для шаринга"""
+    share_text = f"Я только что задонатил в Banana NFT боте! 🍌\nПрисоединяйся: https://t.me/banananftbot"
+    share_url = f"https://t.me/share/url?url=https://t.me/banananftbot&text={share_text}"
+    
+    buttons = [
+        [
+            InlineKeyboardButton(text="📱 Поделиться в TG", url=share_url),
+            InlineKeyboardButton(text="🎨 Картинка", callback_data="share_image")
+        ],
+        [
+            InlineKeyboardButton(text="📊 Подробная статистика", callback_data="detailed_stats"),
+            InlineKeyboardButton(text="📈 Прогресс", callback_data="progress")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="back")
+        ]
     ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_admin_keyboard() -> InlineKeyboardMarkup:
+    """Админ-клавиатура"""
+    buttons = [
+        [
+            InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
+            InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")
+        ],
+        [
+            InlineKeyboardButton(text="💰 Донаты", callback_data="admin_donations"),
+            InlineKeyboardButton(text="🎯 Цели", callback_data="admin_goals")
+        ],
+        [
+            InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"),
+            InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings")
+        ],
+        [
+            InlineKeyboardButton(text="💾 Бэкап", callback_data="admin_backup"),
+            InlineKeyboardButton(text="🔄 Сброс кэша", callback_data="admin_clear_cache")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="back")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# ============ STATES ============
+class DonationState(StatesGroup):
+    waiting_amount = State()
+    waiting_custom_amount = State()
+    processing_payment = State()
+
+class AdminState(StatesGroup):
+    waiting_broadcast = State()
+    waiting_goal = State()
+    waiting_settings = State()
 
 # ============ ХЕНДЛЕРЫ ============
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    user = get_user(message.from_user.id, message.from_user.username)
+    """Обработчик команды /start"""
+    user = db.get_user(message.from_user.id, message.from_user.username)
+    
+    # Генерируем приветственное изображение
+    img_buffer = ImageGenerator.generate_welcome_image(
+        message.from_user.first_name or message.from_user.username or "Друг"
+    )
     
     welcome_text = f"""
-    🍌 *Добро пожаловать в BANANA NFT!* 🚀
+🍌 *Добро пожаловать в BANANA NFT!* 🚀
 
-    *Твой статус:* {user['rank']}
-    *Твой вклад:* {user['total_donated']} USDT
-    *Уровень:* {user['level']}
+*Твой статус:* {user['rank']}
+*Твой вклад:* {user['total_donated']:.2f} USDT
+*Уровень:* {user['level']} (XP: {user['xp']})
 
-    🌟 *Что у нас есть:*
-    • Система донатов с рейтингом
-    • Эксклюзивные подарки за вклад
-    • Возможность делиться достижениями
-    • Секретные обновления...
+🌟 *Что у нас есть:*
+• Система донатов с рейтингом 🏆
+• Эксклюзивные подарки за вклад 🎁
+• Возможность делиться достижениями 📱
+• Секретные обновления... 🔮
 
-    🎁 *Ближайший подарок:* Golden Banana NFT
-    *Нужно:* 100 USDT всего
-    *Собрано:* {load_db()['total_donated']}/100 USDT
+🎁 *Ближайший подарок:* Golden Banana NFT
+*Нужно:* 100 USDT всего
+*Собрано:* {db.data['total_donated']:.2f}/100 USDT
 
-    🔮 *Готовьтесь к Banana NFT Marketplace...*
+🔥 *Ежедневный бонус:* /daily
+📊 *Статистика:* /stats
+
+🔮 *Готовьтесь к Banana NFT Marketplace...*
+✨ *Скоро:* $BNFT токен, мобильная игра, физический мерч!
     """
     
-    await message.answer_photo(
-        photo="https://img.freepik.com/free-vector/gradient-banana-background_23-2150544491.jpg",
-        caption=welcome_text,
-        parse_mode="Markdown",
-        reply_markup=main_menu()
-    )
+    try:
+        await message.answer_photo(
+            photo=BufferedInputFile(img_buffer.getvalue(), filename="welcome.png"),
+            caption=welcome_text,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu()
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки фото: {e}")
+        await message.answer(
+            text=welcome_text,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu()
+        )
+
+@dp.message(Command("daily"))
+async def cmd_daily(message: types.Message):
+    """Ежедневный бонус"""
+    success, bonus_xp = db.get_daily_bonus(message.from_user.id)
+    user = db.get_user(message.from_user.id)
+    
+    if success:
+        text = f"""
+🎉 *Ежедневный бонус получен!*
+
+✨ +{bonus_xp} XP добавлено!
+🔥 Серия дней: {user['daily_streak']}
+📈 Твой уровень: {user['level']} (XP: {user['xp']})
+
+💡 *Совет:* Заходи каждый день чтобы увеличивать серию!
+Максимальный бонус: 100 XP/день
+
+🏆 *Твой прогресс:*
+До следующего уровня: {100 - (user['xp'] % 100)} XP
+Общий вклад: {user['total_donated']:.2f} USDT
+Ранг: {user['rank']}
+
+🔄 *Следующий бонус через:* 24 часа
+        """
+    else:
+        # Вычисляем когда можно получить следующий бонус
+        now = datetime.now()
+        tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0)
+        time_left = tomorrow - now
+        
+        text = f"""
+⏰ *Бонус уже получен сегодня!*
+
+🔥 Текущая серия: {user['daily_streak']} дней
+📊 Твой XP: {user['xp']}
+🎯 Уровень: {user['level']}
+
+🔄 *Следующий бонус через:*
+{time_left.seconds // 3600} ч. {(time_left.seconds % 3600) // 60} мин.
+
+💡 *Не пропусти!* Каждый день серия увеличивается
+и бонус становится больше!
+        """
+    
+    await message.answer(text, parse_mode="Markdown", reply_markup=get_main_menu())
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    """Личная статистика"""
+    user = db.get_user(message.from_user.id, message.from_user.username)
+    position = db.get_user_position(message.from_user.id)
+    
+    # Вычисляем прогресс до следующего ранга
+    next_rank = None
+    for rank in RANKS:
+        if user['total_donated'] < rank['min']:
+            next_rank = rank
+            break
+    
+    progress_text = ""
+    if next_rank:
+        needed = next_rank['min'] - user['total_donated']
+        progress = (user['total_donated'] / next_rank['min']) * 100 if next_rank['min'] > 0 else 100
+        progress_text = f"""
+🎯 *До следующего ранга ({next_rank['name']}):*
+💰 Нужно: {needed:.2f} USDT
+📊 Прогресс: {progress:.1f}%
+        """
+    
+    # Вычисляем следующий подарок
+    next_gift = None
+    gift_tiers = sorted(GIFTS.keys())
+    for tier in gift_tiers:
+        if user['total_donated'] < tier and tier not in [g['tier'] for g in user['gifts_received']]:
+            next_gift = GIFTS[tier]
+            needed_gift = tier - user['total_donated']
+            break
+    
+    gift_text = ""
+    if next_gift:
+        gift_text = f"""
+🎁 *Следующий подарок ({next_gift['name']}):*
+💰 Нужно: {needed_gift:.2f} USDT
+📝 {next_gift['description']}
+        """
+    
+    stats_text = f"""
+📊 *ТВОЯ СТАТИСТИКА BANANA NFT*
+
+👤 *Профиль:*
+ID: `{message.from_user.id}`
+Имя: {message.from_user.first_name or ''}
+Юзернейм: @{message.from_user.username or 'Нет'}
+
+🏆 *Достижения:*
+Ранг: {user['rank']}
+Уровень: {user['level']}
+XP: {user['xp']}/100
+Позиция в топе: #{position}
+
+💰 *Финансы:*
+Всего задонатил: {user['total_donated']:.2f} USDT
+Количество донатов: {len(user['donations'])}
+Последний донат: {user['donations'][-1]['date'][:10] if user['donations'] else 'Еще нет'}
+
+📅 *Активность:*
+В проекте с: {user['join_date'][:10]}
+Ежедневная серия: {user['daily_streak']} дней
+Последняя активность: {user['last_active'][:16]}
+
+🎁 *Полученные подарки:* {len(user['gifts_received'])}
+{progress_text}
+{gift_text}
+
+🌐 *Глобальная статистика:*
+Всего пользователей: {db.data['stats']['total_users']}
+Всего собрано: {db.data['total_donated']:.2f} USDT
+Рекордный донат: {db.data['stats']['biggest_donation']:.2f} USDT
+    """
+    
+    await message.answer(stats_text, parse_mode="Markdown", reply_markup=get_main_menu())
 
 @dp.callback_query(F.data == "donate")
-async def donate_callback(callback: types.CallbackQuery):
+async def callback_donate(callback: types.CallbackQuery):
+    """Обработчик кнопки Донат"""
     text = """
-    💰 *Поддержать BANANA NFT*
+💰 *ПОДДЕРЖАТЬ BANANA NFT*
 
-    Выберите сумму доната или введите свою:
+Выберите сумму доната или введите свою:
 
-    *Что вы получаете:*
-    🏆 - Повышение в рейтинге
-    🎁 - Эксклюзивные подарки
-    🌟 - Уникальные роли
-    💎 - Доступ к закрытому чату
+*Что вы получаете за донат:*
+🏆 - Повышение в рейтинге и XP
+🎁 - Эксклюзивные подарки
+🌟 - Уникальные роли в сообществе
+💎 - Доступ к закрытому чату
+📈 - Участие в развитии проекта
 
-    *Текущая цель:* 1000 USDT
-    *Награда:* Все получат Special NFT!
-    """
+*Текущие цели проекта:*
+"""
+    
+    # Добавляем информацию о целях
+    for goal in db.data['goals'][:3]:  # Показываем первые 3 цели
+        achieved = "✅ " if goal.get('achieved') else "🎯 "
+        progress = (db.data['total_donated'] / goal['target']) * 100
+        text += f"{achieved}*{goal['name']}*: {db.data['total_donated']:.2f}/{goal['target']} USDT ({progress:.1f}%)\n"
+    
+    text += f"\n💡 *Совет:* Чем больше сумма - тем лучше подарки!"
+    text += f"\n🎯 *Ваш текущий вклад:* {db.get_user(callback.from_user.id)['total_donated']:.2f} USDT"
     
     await callback.message.edit_caption(
         caption=text,
         parse_mode="Markdown",
-        reply_markup=donate_keyboard()
+        reply_markup=get_donate_keyboard()
     )
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("donate_"))
-async def quick_donate(callback: types.CallbackQuery, state: FSMContext):
-    amount_str = callback.data.split("_")[1]
+async def callback_quick_donate(callback: types.CallbackQuery, state: FSMContext):
+    """Быстрый донат по кнопке"""
+    data = callback.data
     
-    if amount_str == "custom":
-        await callback.message.answer("Введите сумму доната в USDT:")
-        await state.set_state(DonationState.waiting_for_amount)
-    else:
-        try:
-            amount = float(amount_str)
-            await process_donation(callback, amount, state)
-        except:
-            await callback.answer("Ошибка суммы", show_alert=True)
+    if data == "donate_custom":
+        await callback.message.answer(
+            "💵 *Введите сумму доната в USDT:*\n\n"
+            "Минимальная сумма: 0.1 USDT\n"
+            "Максимальная: 10000 USDT",
+            parse_mode="Markdown"
+        )
+        await state.set_state(DonationState.waiting_custom_amount)
+        await callback.answer()
+        return
     
-    await callback.answer()
-
-@dp.message(DonationState.waiting_for_amount)
-async def process_custom_amount(message: types.Message, state: FSMContext):
+    # Извлекаем сумму из callback_data
+    amount_str = data.split("_")[1]
     try:
-        amount = float(message.text.replace(',', '.'))
+        amount = float(amount_str)
+        await process_donation(callback, amount, state)
+    except ValueError:
+        await callback.answer("❌ Ошибка: неверная сумма", show_alert=True)
+
+@dp.message(DonationState.waiting_custom_amount)
+async def process_custom_amount(message: types.Message, state: FSMContext):
+    """Обработка пользовательской суммы"""
+    try:
+        # Очищаем ввод
+        amount_text = message.text.replace(',', '.').strip()
+        amount = float(amount_text)
+        
+        # Проверка лимитов
         if amount < 0.1:
-            await message.answer("Минимальная сумма: 0.1 USDT")
+            await message.answer("❌ Минимальная сумма: 0.1 USDT")
+            return
+        if amount > 10000:
+            await message.answer("❌ Максимальная сумма: 10000 USDT")
             return
         
-        await process_donation(None, amount, state, message)
-    except:
-        await message.answer("Пожалуйста, введите корректную сумму (например: 10.5)")
+        # Создаем callback для обработки
+        class FakeCallback:
+            def __init__(self):
+                self.from_user = message.from_user
+                self.message = message
+        
+        fake_callback = FakeCallback()
+        await process_donation(fake_callback, amount, state)
+        
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите корректную сумму (например: 10.5 или 100)")
 
-async def process_donation(callback, amount, state, message=None):
-    user_id = callback.from_user.id if callback else message.from_user.id
-    username = callback.from_user.username if callback else message.from_user.username
+async def process_donation(callback, amount: float, state: FSMContext):
+    """Обработка доната"""
+    user_id = callback.from_user.id
+    username = callback.from_user.username or callback.from_user.first_name or "User"
     
-    try:
-        # Создаем счет в CryptoBot
-        invoice = await crypto_bot.create_invoice(
-            amount=amount,
-            currency="USDT",
-            description=f"Donation to Banana NFT from @{username}"
-        )
-        
-        await state.update_data(invoice_id=invoice["invoice_id"], amount=amount)
-        await state.set_state(DonationState.processing_payment)
-        
-        text = f"""
-        🍌 *ОПЛАТА ДОНАТА*
+    # Создаем счет в CryptoBot
+    invoice = await crypto_bot.create_invoice(
+        amount=amount,
+        currency="USDT",
+        description=f"Donation to Banana NFT from {username}",
+        user_id=user_id
+    )
+    
+    if not invoice.get("success"):
+        error_msg = f"❌ Ошибка создания счета: {invoice.get('error', 'Unknown error')}"
+        if hasattr(callback, 'answer'):
+            await callback.answer(error_msg, show_alert=True)
+        else:
+            await callback.answer(error_msg)
+        return
+    
+    # Сохраняем данные в state
+    await state.update_data(
+        invoice_id=invoice["invoice_id"],
+        amount=amount,
+        user_id=user_id,
+        username=username,
+        expires_at=invoice.get("expires_at")
+    )
+    await state.set_state(DonationState.processing_payment)
+    
+    # Формируем сообщение
+    text = f"""
+💳 *ОПЛАТА ДОНАТА #{invoice['invoice_id'][-6:]}*
 
-        *Сумма:* {amount} USDT
-        *Статус:* Ожидает оплаты
+📝 *Детали:*
+👤 Пользователь: @{username}
+💰 Сумма: {amount} USDT
+🕐 Действителен до: {invoice.get('expires_at', '1 час')}
 
-        💳 *Инструкция:*
-        1. Нажмите кнопку "Оплатить"
-        2. Оплатите счет в CryptoBot
-        3. Вернитесь и нажмите "Проверить оплату"
+💡 *Инструкция:*
+1. Нажмите кнопку "💳 Оплатить сейчас"
+2. Оплатите счет в CryptoBot
+3. Вернитесь и нажмите "✅ Я оплатил"
+4. Ждите подтверждения (до 2 минут)
 
-        🎁 *Бонусы за этот донат:*
-        • +{amount * 10} очков рейтинга
-        • Прогресс к следующему уровню
-        • Шанс выиграть Golden Banana NFT!
+🎁 *Бонусы за этот донат:*
+• +{int(amount * 10)} XP
+• Прогресс к следующему рангу
+• Шанс получить редкий подарок
+• Увеличивается позиция в топе
 
-        *Следующий подарок через:* {100 - amount} USDT
-        """
-        
-        if callback:
+⚠️ *Важно:* Счет действителен 1 час
+После оплаты нажмите "✅ Я оплатил"
+    """
+    
+    # Отправляем сообщение с кнопками
+    if hasattr(callback, 'message'):
+        try:
             await callback.message.edit_caption(
                 caption=text,
                 parse_mode="Markdown",
-                reply_markup=payment_keyboard(invoice["pay_url"])
+                reply_markup=get_payment_keyboard(invoice['pay_url'], invoice['invoice_id'])
             )
-        else:
-            await message.answer(
+        except:
+            await callback.message.answer(
                 text=text,
                 parse_mode="Markdown",
-                reply_markup=payment_keyboard(invoice["pay_url"])
+                reply_markup=get_payment_keyboard(invoice['pay_url'], invoice['invoice_id'])
+            )
+    else:
+        await callback.answer(
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=get_payment_keyboard(invoice['pay_url'], invoice['invoice_id'])
+        )
+
+@dp.callback_query(F.data.startswith("check_"))
+async def callback_check_payment(callback: types.CallbackQuery, state: FSMContext):
+    """Проверка оплаты"""
+    invoice_id = callback.data.split("_")[1]
+    
+    # Проверяем статус счета
+    invoice_status = await crypto_bot.get_invoice(invoice_id)
+    
+    if invoice_status.get("success"):
+        if invoice_status["status"] == "paid":
+            # Получаем данные из state
+            data = await state.get_data()
+            amount = data.get("amount", 0)
+            user_id = data.get("user_id")
+            username = data.get("username", "")
+            
+            # Обновляем пользователя
+            rank, level = db.update_user(user_id, amount, username)
+            
+            # Проверяем подарки
+            gifts_received = []
+            for tier, gift_info in GIFTS.items():
+                if amount >= tier:
+                    gift = db.add_gift(user_id, tier)
+                    if gift:
+                        gifts_received.append(gift["name"])
+            
+            # Формируем сообщение об успехе
+            gifts_text = "\n".join([f"• {gift}" for gift in gifts_received]) if gifts_received else "• Базовая награда"
+            
+            text = f"""
+🎉 *ОПЛАТА ПОДТВЕРЖДЕНА!*
+
+✅ Спасибо за ваш донат в Banana NFT!
+
+📊 *Детали:*
+💰 Сумма: {amount} USDT
+🏆 Новый ранг: {rank}
+⭐ Уровень: {level}
+📈 Всего задоначено: {db.get_user(user_id)['total_donated']:.2f} USDT
+
+🎁 *Вы получили:*
+{gifts_text}
+• VIP статус на 7 дней
+• +{int(amount * 10)} XP
+• Доступ к эклюзивным стикерам
+
+🔥 *Ваша новая позиция в топе:* #{db.get_user_position(user_id)}
+📊 *Общая собрано проектом:* {db.data['total_donated']:.2f} USDT
+
+💡 *Совет:* Используйте кнопку "🌟 Поделиться"
+чтобы похвастаться достижением друзьям!
+            """
+            
+            # Генерируем картинку для шаринга
+            img_buffer = ImageGenerator.generate_donation_image(
+                username=callback.from_user.username or callback.from_user.first_name,
+                amount=amount,
+                rank=rank
             )
             
-    except Exception as e:
-        error_msg = f"Ошибка создания счета: {str(e)}"
-        if callback:
-            await callback.message.answer(error_msg)
+            # Отправляем сообщение об успехе
+            await callback.message.answer_photo(
+                photo=BufferedInputFile(img_buffer.getvalue(), filename="donation.png"),
+                caption=text,
+                parse_mode="Markdown",
+                reply_markup=get_main_menu()
+            )
+            
+            # Уведомляем админа
+            admin_text = f"""
+🎉 *НОВЫЙ ДОНАТ!*
+
+👤 Пользователь: @{username}
+💰 Сумма: {amount} USDT
+🏆 Ранг: {rank}
+📈 Всего у пользователя: {db.get_user(user_id)['total_donated']:.2f} USDT
+🌐 Общий сбор проекта: {db.data['total_donated']:.2f} USDT
+            """
+            
+            try:
+                await bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown")
+            except:
+                pass
+            
+            # Очищаем state
+            await state.clear()
+            
         else:
-            await message.answer(error_msg)
+            text = f"""
+⏳ *ОПЛАТА ЕЩЕ НЕ ПОСТУПИЛА*
 
-@dp.callback_query(F.data == "check_payment")
-async def check_payment(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
+Статус: {invoice_status['status']}
+Счет: {invoice_id[-6:]}
+
+💡 *Если вы оплатили:*
+1. Подождите 1-2 минуты
+2. Нажмите "🔄 Обновить"
+3. Или проверьте позже
+
+⚠️ Счет действителен 1 час с момента создания
+            """
+            await callback.message.edit_caption(
+                caption=text,
+                parse_mode="Markdown"
+            )
+    else:
+        await callback.answer(f"❌ Ошибка: {invoice_status.get('error', 'Unknown')}", show_alert=True)
     
-    # Здесь должна быть проверка оплаты через CryptoBot API
-    # Для демо - считаем оплаченным
-    user_id = callback.from_user.id
-    username = callback.from_user.username
+    await callback.answer()
+
+@dp.callback_query(F.data == "top")
+async def callback_top(callback: types.CallbackQuery):
+    """Топ донатеров"""
+    top_users = db.get_top_users(10)
     
-    # Обновляем пользователя
-    amount = data.get("amount", 0)
-    rank, level = update_user(user_id, amount, username)
+    # Генерируем изображение топа
+    img_buffer = ImageGenerator.generate_top_image(top_users, db.data['total_donated'])
     
-    # Показываем результат
     text = f"""
-    🎉 *ОПЛАТА ПОДТВЕРЖДЕНА!*
+🏆 *ТОП ДОНАТЕРОВ BANANA NFT* 🍌
 
-    ✅ Спасибо за донат!
+*Всего собрано:* {db.data['total_donated']:.2f} USDT
+*Всего пользователей:* {db.data['stats']['total_users']}
+*Рекордный донат:* {db.data['stats']['biggest_donation']:.2f} USDT
+
+*Текущие цели проекта:*
+"""
     
-    *Детали:*
-    💰 Сумма: {amount} USDT
-    🏆 Новый ранг: {rank}
-    ⭐ Уровень: {level}
-    📈 Всего задоначено: {get_user(user_id)['total_donated']} USDT
+    # Добавляем прогресс целей
+    for goal in db.data['goals'][:2]:
+        achieved = "✅ " if goal.get('achieved') else "🎯 "
+        progress = (db.data['total_donated'] / goal['target']) * 100
+        text += f"{achieved}*{goal['name']}*: {progress:.1f}%\n"
+    
+    text += f"\n✨ *Ваша позиция:* #{db.get_user_position(callback.from_user.id)}"
+    text += f"\n💰 *Ваш вклад:* {db.get_user(callback.from_user.id)['total_donated']:.2f} USDT"
+    
+    try:
+        await callback.message.answer_photo(
+            photo=BufferedInputFile(img_buffer.getvalue(), filename="top.png"),
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu()
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки фото топа: {e}")
+        # Формируем текстовый топ
+        top_text = "🏆 *ТОП ДОНАТЕРОВ:*\n\n"
+        for i, user in enumerate(top_users, 1):
+            medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
+            username = user.get("username", "Аноним")[:15]
+            top_text += f"{medal} @{username}\n"
+            top_text += f"   💰 *{user['total_donated']:.2f} USDT* | {user['rank']}\n\n"
+        
+        await callback.message.answer(
+            text=top_text + text,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu()
+        )
+    
+    await callback.answer()
 
-    🎁 *Вы получили:*
-    • VIP статус на 7 дней
-    • +{amount * 10} очков рейтинга
-    • Доступ к эксклюзивным стикерам
+@dp.callback_query(F.data == "gifts")
+async def callback_gifts(callback: types.CallbackQuery):
+    """Подарки"""
+    user = db.get_user(callback.from_user.id)
+    
+    text = """
+🎁 *ЭКСКЛЮЗИВНЫЕ ПОДАРКИ BANANA NFT*
 
-    🔮 *Следующая цель:* 500 USDT
-    *Награда:* Персональный NFT Banana!
+*За ваши донаты вы получаете:*
+"""
+    
+    # Список подарков
+    for tier, gift_info in GIFTS.items():
+        received = any(g['tier'] == tier for g in user['gifts_received'])
+        status = "✅ " if received else "🎯 "
+        
+        if received:
+            # Ищем когда получил
+            gift_data = next(g for g in user['gifts_received'] if g['tier'] == tier)
+            date = gift_data['date'][:10]
+            text += f"{status}*{gift_info['name']}* (получен {date})\n"
+        else:
+            needed = tier - user['total_donated']
+            if needed > 0:
+                text += f"{status}*{gift_info['name']}* (нужно еще {needed:.2f} USDT)\n"
+            else:
+                text += f"{status}*{gift_info['name']}* (можно забрать!)\n"
+        
+        text += f"   📝 {gift_info['description']}\n\n"
+    
+    # Полученные подарки
+    if user['gifts_received']:
+        text += "\n✅ *Уже получено:*\n"
+        for gift in user['gifts_received']:
+            text += f"• {gift['name']} ({gift['date'][:10]})\n"
+    
+    text += f"\n💰 *Ваш текущий вклад:* {user['total_donated']:.2f} USDT"
+    text += f"\n🎯 *До следующего подарка:* "
+    
+    # Ищем следующий подарок
+    next_gift_tier = None
+    for tier in sorted(GIFTS.keys()):
+        if not any(g['tier'] == tier for g in user['gifts_received']):
+            next_gift_tier = tier
+            break
+    
+    if next_gift_tier:
+        needed = next_gift_tier - user['total_donated']
+        if needed > 0:
+            text += f"{needed:.2f} USDT"
+        else:
+            text += "можно забрать! /donate"
+    else:
+        text += "все подарки получены! 🎉"
+    
+    await callback.message.edit_caption(
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=get_main_menu()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "share")
+async def callback_share(callback: types.CallbackQuery):
+    """Поделиться достижением"""
+    user = db.get_user(callback.from_user.id)
+    
+    text = f"""
+🌟 *ПОДЕЛИТЬСЯ ДОСТИЖЕНИЕМ*
+
+🏆 *Ваши текущие достижения:*
+Ранг: {user['rank']}
+Сумма донатов: {user['total_donated']:.2f} USDT
+Уровень: {user['level']}
+Позиция в топе: #{db.get_user_position(callback.from_user.id)}
+
+📱 *Выберите способ поделиться:*
+1. *Поделиться в Telegram* - отправить сообщение друзьям
+2. *Картинка* - сгенерировать красивую картинку с вашими достижениями
+3. *Подробная статистика* - полная информация о вашем прогрессе
+
+✨ *За шаринг вы получите:*
+• +50 XP
+• Шанс на редкий дроп
+• Упоминание в нашем канале
+• Уважение сообщества
+
+🎨 *Картинка будет содержать:*
+• Ваш юзернейм и аватар
+• Сумму донатов
+• Ваш ранг и достижения
+• Логотип Banana NFT
+• Красивые эффекты и градиенты
     """
     
     await callback.message.edit_caption(
         caption=text,
         parse_mode="Markdown",
-        reply_markup=main_menu()
-    )
-    
-    # Уведомляем админа
-    await bot.send_message(
-        ADMIN_ID,
-        f"🎉 Новый донат!\n"
-        f"👤 @{username}\n"
-        f"💰 {amount} USDT\n"
-        f"🏆 Новый ранг: {rank}"
-    )
-    
-    await state.clear()
-    await callback.answer()
-
-@dp.callback_query(F.data == "top")
-async def show_top(callback: types.CallbackQuery):
-    db = load_db()
-    top_users = sorted(db["users"].items(), 
-                      key=lambda x: x[1]["total_donated"], 
-                      reverse=True)[:10]
-    
-    top_text = "🏆 *ТОП ДОНАТЕРОВ BANANA NFT* 🍌\n\n"
-    
-    for i, (user_id, user_data) in enumerate(top_users, 1):
-        medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
-        username = user_data.get("username", "Аноним")
-        total = user_data["total_donated"]
-        
-        top_text += f"{medal} @{username}\n"
-        top_text += f"   💰 *{total} USDT* | {user_data['rank']}\n"
-        top_text += f"   ⭐ Уровень: {user_data['level']}\n\n"
-    
-    top_text += f"\n💎 Всего собрано: *{db['total_donated']} USDT*"
-    top_text += f"\n🎯 Цель: 1000 USDT | Прогресс: {db['total_donated']/1000*100:.1f}%"
-    
-    await callback.message.edit_caption(
-        caption=top_text,
-        parse_mode="Markdown",
-        reply_markup=main_menu()
+        reply_markup=get_share_keyboard(callback.from_user.id)
     )
     await callback.answer()
 
-@dp.callback_query(F.data == "stats")
-async def show_stats(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    user = get_user(user_id, callback.from_user.username)
-    
-    stats_text = f"""
-    📊 *ВАША СТАТИСТИКА*
-
-    👤 *Профиль:*
-    Имя: @{callback.from_user.username or 'Аноним'}
-    ID: {user_id}
-    
-    🏆 *Достижения:*
-    Ранг: {user['rank']}
-    Уровень: {user['level']}
-    Всего донатов: {len(user['donations'])}
-    
-    💰 *Финансы:*
-    Общая сумма: {user['total_donated']} USDT
-    Место в топе: #{get_user_rank(user_id)}
-    
-    📅 *Активность:*
-    В проекте с: {user['join_date'][:10]}
-    Последний донат: {user['donations'][-1]['date'][:10] if user['donations'] else 'еще нет'}
-    
-    🎯 *Прогресс:*
-    До след. уровня: {user['level']*10 - user['total_donated']} USDT
-    До след. ранга: {get_next_rank_need(user['total_donated'])} USDT
-    """
-    
-    await callback.message.edit_caption(
-        caption=stats_text,
-        parse_mode="Markdown",
-        reply_markup=main_menu()
-    )
-    await callback.answer()
-
-def get_user_rank(user_id):
-    db = load_db()
-    sorted_users = sorted(db["users"].items(), 
-                         key=lambda x: x[1]["total_donated"], 
-                         reverse=True)
-    
-    for i, (uid, _) in enumerate(sorted_users, 1):
-        if str(user_id) == uid:
-            return i
-    return 999
-
-def get_next_rank_need(current_amount):
-    ranks = [0, 10, 50, 100, 500, 1000, 5000]
-    for rank in ranks:
-        if current_amount < rank:
-            return rank - current_amount
-    return 0
-
-@dp.callback_query(F.data == "gifts")
-async def show_gifts(callback: types.CallbackQuery):
-    gifts_text = """
-    🎁 *ЭКСКЛЮЗИВНЫЕ ПОДАРКИ*
-
-    *За ваши донаты вы получаете:*
-
-    🍌 *10+ USDT:*
-    • Кастомный эмодзи Banana
-    • Роль в группе
-    • +100 очков рейтинга
-
-    💰 *50+ USDT:*
-    • Стикерпак "Banana Gang"
-    • VIP на 30 дней
-    • Golden Name в чате
-    • Доступ к закрытому каналу
-
-    🌟 *100+ USDT:*
-    • Персональный NFT Banana
-    • Сооснователь клуба
-    • Участие в голосованиях
-    • Эксклюзивные анонсы
-
-    🏆 *500+ USDT:*
-    • Diamond Banana NFT
-    • Пожизненный VIP
-    • Личный менеджер
-    • Доход с проекта 1%
-
-    👑 *1000+ USDT:*
-    • Владелец Banana Token
-    • Управление проектом
-    • Все предыдущие плюшки ×2
-    • Место в Зале Славы
-
-    🔮 *Скоро:*
-    • Banana NFT Marketplace
-    • $BNFT токен
-    • Мобильная игра
-    • Физический мерч
-    """
-    
-    await callback.message.edit_caption(
-        caption=gifts_text,
-        parse_mode="Markdown",
-        reply_markup=main_menu()
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "share")
-async def share_menu(callback: types.CallbackQuery):
-    user = get_user(callback.from_user.id, callback.from_user.username)
-    
-    share_text = f"""
-    🌟 *ПОДЕЛИТЬСЯ ДОСТИЖЕНИЕМ*
-
-    🏆 *Ваш текущий результат:*
-    Ранг: {user['rank']}
-    Сумма: {user['total_donated']} USDT
-    Уровень: {user['level']}
-
-    📱 *Выберите способ:*
-    1. Поделиться в Telegram
-    2. Сгенерировать красивую картинку
-    3. Скопировать текст для соцсетей
-
-    🎨 *Картинка будет содержать:*
-    • Ваш юзернейм
-    • Сумму донатов
-    • Ваш ранг
-    • Логотип Banana NFT
-    • Эффекты и градиенты
-
-    ✨ *За шаринг вы получите:*
-    • +50 очков рейтинга
-    • Шанс на редкий дроп
-    • Упоминание в канале
-    """
-    
-    await callback.message.edit_caption(
-        caption=share_text,
-        parse_mode="Markdown",
-        reply_markup=share_keyboard()
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "generate_image")
-async def generate_share_image(callback: types.CallbackQuery):
-    user = get_user(callback.from_user.id, callback.from_user.username)
+@dp.callback_query(F.data == "share_image")
+async def callback_share_image(callback: types.CallbackQuery):
+    """Генерация картинки для шаринга"""
+    user = db.get_user(callback.from_user.id)
     
     # Генерируем картинку
-    img_buffer = generate_donation_image(
-        username=callback.from_user.username or "Аноним",
+    img_buffer = ImageGenerator.generate_donation_image(
+        username=callback.from_user.username or callback.from_user.first_name,
         amount=user['total_donated'],
         rank=user['rank']
     )
     
-    # Отправляем картинку
+    caption = f"""
+🏆 *Мое достижение в Banana NFT!* 🍌
+
+Ранг: {user['rank']}
+Вклад: {user['total_donated']:.2f} USDT
+Уровень: {user['level']}
+Позиция в топе: #{db.get_user_position(callback.from_user.id)}
+
+Присоединяйся к самому сочному NFT проекту!
+👉 @banananftbot
+
+#BananaNFT #Донат #Крипта #TelegramБот
+    """
+    
     await callback.message.answer_photo(
-        photo=types.BufferedInputFile(img_buffer.getvalue(), filename="banana_donation.png"),
-        caption=f"🏆 *Мое достижение в Banana NFT!*\n\n"
-               f"Присоединяйся: @banananftbot\n"
-               f"#BananaNFT #Донат",
+        photo=BufferedInputFile(img_buffer.getvalue(), filename="achievement.png"),
+        caption=caption,
         parse_mode="Markdown"
     )
-    
     await callback.answer("Картинка сгенерирована! ✨")
 
 @dp.callback_query(F.data == "back")
-async def back_to_main(callback: types.CallbackQuery):
+async def callback_back(callback: types.CallbackQuery, state: FSMContext):
+    """Назад в главное меню"""
+    await state.clear()
     await cmd_start(callback.message)
     await callback.answer()
 
-# ============ АДМИН КОМАНДЫ ============
-@dp.message(Command("admin"))
-async def admin_panel(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("Нет доступа!")
+@dp.callback_query(F.data == "admin")
+async def callback_admin(callback: types.CallbackQuery):
+    """Админ панель"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Доступ запрещен!", show_alert=True)
         return
     
-    db = load_db()
-    
-    admin_text = f"""
-    👑 *АДМИН ПАНЕЛЬ BANANA NFT*
+    text = f"""
+👑 *АДМИН ПАНЕЛЬ BANANA NFT*
 
-    📊 *Статистика:*
-    Всего пользователей: {len(db['users'])}
-    Всего донатов: {db['total_donated']} USDT
-    Топ донат: {max([u['total_donated'] for u in db['users'].values()] or [0])} USDT
-    
-    💰 *Последние донаты:*
+📊 *Общая статистика:*
+Пользователей: {db.data['stats']['total_users']}
+Всего донатов: {db.data['stats']['total_donations']}
+Общая сумма: {db.data['total_donated']:.2f} USDT
+Рекордный донат: {db.data['stats']['biggest_donation']:.2f} USDT
+
+📈 *За последние 24 часа:*
+Новых пользователей: 0
+Новых донатов: 0
+Сумма: 0 USDT
+
+💰 *Комиссия проекта:* {db.data['settings']['commission']}%
+🎯 *Минимальный донат:* {db.data['settings']['min_donation']} USDT
+
+⚙️ *Управление:*
+• Рассылка сообщений всем пользователям
+• Просмотр детальной статистики
+• Управление целями проекта
+• Настройки бота
+• Бэкап базы данных
+
+💡 *Совет:* Используйте кнопки ниже для управления ботом.
     """
     
-    for donation in db["top_donations"][:5]:
-        admin_text += f"• @{donation['username']}: {donation['amount']} USDT\n"
+    await callback.message.edit_caption(
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=get_admin_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("admin_"))
+async def callback_admin_actions(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка админ-действий"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Доступ запрещен!", show_alert=True)
+        return
     
-    keyboard = [
-        [InlineKeyboardButton(text="📈 Полная статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="📢 Сделать рассылку", callback_data="admin_broadcast")],
-        [InlineKeyboardButton(text="🎯 Установить цель", callback_data="admin_set_goal")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings")]
-    ]
+    action = callback.data
+    
+    if action == "admin_stats":
+        # Детальная статистика
+        now = datetime.now()
+        today = now.date().isoformat()
+        
+        # Считаем статистику за сегодня
+        today_donations = 0
+        today_amount = 0
+        today_users = set()
+        
+        for user_id, user_data in db.data["users"].items():
+            for donation in user_data.get("donations", []):
+                if donation.get("date", "").startswith(today):
+                    today_donations += 1
+                    today_amount += donation.get("amount", 0)
+                    today_users.add(user_id)
+        
+        # Самые активные пользователи
+        top_active = sorted(
+            db.data["users"].items(),
+            key=lambda x: len(x[1].get("donations", [])),
+            reverse=True
+        )[:5]
+        
+        text = f"""
+📊 *ДЕТАЛЬНАЯ СТАТИСТИКА*
+
+📈 *Общая:*
+👥 Пользователей: {db.data['stats']['total_users']}
+💰 Всего собрано: {db.data['total_donated']:.2f} USDT
+🎯 Донатов: {db.data['stats']['total_donations']}
+🏆 Рекорд: {db.data['stats']['biggest_donation']:.2f} USDT
+
+📅 *За сегодня ({today}):*
+👤 Новых пользователей: {len([u for u in db.data['users'].values() if u['join_date'].startswith(today)])}
+💰 Сумма донатов: {today_amount:.2f} USDT
+🎯 Количество донатов: {today_donations}
+👥 Уникальных донатеров: {len(today_users)}
+
+🏆 *Топ-5 активных пользователей:*
+"""
+        
+        for i, (user_id, user_data) in enumerate(top_active, 1):
+            text += f"{i}. @{user_data.get('username', 'Аноним')}\n"
+            text += f"   💰 {user_data['total_donated']:.2f} USDT | 🎯 {len(user_data.get('donations', []))} донатов\n"
+        
+        text += f"\n📊 *Распределение по рангам:*\n"
+        rank_counts = {}
+        for user_data in db.data["users"].values():
+            rank = user_data.get("rank", "Unknown")
+            rank_counts[rank] = rank_counts.get(rank, 0) + 1
+        
+        for rank, count in sorted(rank_counts.items(), key=lambda x: x[1], reverse=True):
+            emoji = next((r["emoji"] for r in RANKS if r["name"] == rank), "❓")
+            text += f"{emoji} {rank}: {count} чел.\n"
+        
+        await callback.message.edit_caption(
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
+        )
+    
+    elif action == "admin_users":
+        # Список пользователей
+        users = list(db.data["users"].values())
+        users_sorted = sorted(users, key=lambda x: x["total_donated"], reverse=True)
+        
+        text = f"""
+👥 *СПИСОК ПОЛЬЗОВАТЕЛЕЙ*
+
+Всего пользователей: {len(users)}
+
+*Топ-10 по донатам:*
+"""
+        
+        for i, user in enumerate(users_sorted[:10], 1):
+            username = user.get("username", "Аноним")
+            join_date = user.get("join_date", "")[:10]
+            text += f"{i}. @{username}\n"
+            text += f"   💰 {user['total_donated']:.2f} USDT | 🎯 {len(user.get('donations', []))} донатов\n"
+            text += f"   📅 {join_date} | 🔥 {user.get('daily_streak', 0)} дней\n"
+            if user.get("gifts_received"):
+                text += f"   🎁 Подарков: {len(user['gifts_received'])}\n"
+            text += "\n"
+        
+        text += f"📊 *Средний донат на пользователя:* {db.data['total_donated']/len(users):.2f} USDT"
+        
+        await callback.message.edit_caption(
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
+        )
+    
+    elif action == "admin_donations":
+        # Последние донаты
+        all_donations = []
+        for user_id, user_data in db.data["users"].items():
+            for donation in user_data.get("donations", []):
+                all_donations.append({
+                    "user_id": user_id,
+                    "username": user_data.get("username", "Аноним"),
+                    "amount": donation.get("amount", 0),
+                    "date": donation.get("date", "")
+                })
+        
+        # Сортируем по дате
+        recent_donations = sorted(all_donations, key=lambda x: x["date"], reverse=True)[:20]
+        
+        text = """
+💰 *ПОСЛЕДНИЕ ДОНАТЫ*
+
+*Последние 20 донатов:*
+"""
+        
+        total_last_24h = 0
+        now = datetime.now()
+        
+        for i, donation in enumerate(recent_donations, 1):
+            date_str = donation["date"][:16] if donation["date"] else "N/A"
+            
+            # Проверяем если донат был за последние 24 часа
+            try:
+                donate_time = datetime.fromisoformat(donation["date"].replace('Z', '+00:00'))
+                if (now - donate_time).total_seconds() <= 86400:  # 24 часа
+                    total_last_24h += donation["amount"]
+            except:
+                pass
+            
+            text += f"{i}. @{donation['username']}\n"
+            text += f"   💰 {donation['amount']:.2f} USDT | 📅 {date_str}\n\n"
+        
+        text += f"💸 *Сумма за последние 24 часа:* {total_last_24h:.2f} USDT"
+        
+        await callback.message.edit_caption(
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
+        )
+    
+    elif action == "admin_goals":
+        # Управление целями
+        text = """
+🎯 *УПРАВЛЕНИЕ ЦЕЛЯМИ ПРОЕКТА*
+
+*Текущие цели:*
+"""
+        
+        for i, goal in enumerate(db.data["goals"], 1):
+            achieved = "✅ " if goal.get("achieved") else "🎯 "
+            progress = (db.data["total_donated"] / goal["target"]) * 100 if goal["target"] > 0 else 100
+            date_achieved = f" ({goal.get('achieved_date', '')[:10]})" if goal.get("achieved") else ""
+            
+            text += f"{achieved}*{goal['name']}*\n"
+            text += f"   🎯 Цель: {goal['target']} USDT\n"
+            text += f"   📊 Прогресс: {progress:.1f}% ({db.data['total_donated']:.2f}/{goal['target']})\n"
+            text += f"   🎁 Награда: {goal.get('reward', 'Не указана')}{date_achieved}\n\n"
+        
+        text += """
+⚙️ *Управление:*
+• /add_goal [сумма] [название] [награда] - добавить цель
+• /remove_goal [номер] - удалить цель
+• /edit_goal [номер] [поле] [значение] - изменить цель
+"""
+        
+        await callback.message.edit_caption(
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
+        )
+    
+    elif action == "admin_broadcast":
+        # Рассылка
+        await callback.message.answer(
+            "📢 *ОТПРАВИТЬ РАССЫЛКУ*\n\n"
+            "Введите сообщение для рассылки всем пользователям:\n\n"
+            "💡 *Подсказка:* Используйте Markdown форматирование\n"
+            "⚠️ *Внимание:* Рассылка будет отправлена всем {db.data['stats']['total_users']} пользователям",
+            parse_mode="Markdown"
+        )
+        await state.set_state(AdminState.waiting_broadcast)
+    
+    elif action == "admin_settings":
+        # Настройки
+        text = f"""
+⚙️ *НАСТРОЙКИ БОТА*
+
+*Текущие настройки:*
+💰 Минимальный донат: {db.data['settings']['min_donation']} USDT
+💸 Комиссия проекта: {db.data['settings']['commission']}%
+🔄 Последний сброс: {db.data['settings']['last_reset'][:10]}
+
+*Управление настройками:*
+1. Изменить минимальный донат
+2. Изменить комиссию
+3. Сбросить статистику
+4. Экспорт данных
+
+💡 *Для изменения настроек используйте команды:*
+• /set_mindonation [сумма]
+• /set_commission [процент]
+• /reset_stats - сброс статистики (кроме пользователей)
+• /export_data - экспорт в CSV
+"""
+        
+        await callback.message.edit_caption(
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
+        )
+    
+    elif action == "admin_backup":
+        # Бэкап
+        db.save()
+        backup_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Создаем дополнительный бэкап
+        backup_data = {
+            "backup_time": backup_time,
+            "data": db.data,
+            "total_users": db.data['stats']['total_users'],
+            "total_donated": db.data['total_donated']
+        }
+        
+        backup_filename = f"backup_{backup_time.replace(' ', '_').replace(':', '-')}.json"
+        with open(backup_filename, 'w', encoding='utf-8') as f:
+            json.dump(backup_data, f, indent=4, ensure_ascii=False)
+        
+        text = f"""
+💾 *БЭКАП БАЗЫ ДАННЫХ*
+
+✅ Бэкап успешно создан!
+📅 Время: {backup_time}
+📊 Данные:
+   👥 Пользователей: {db.data['stats']['total_users']}
+   💰 Сумма: {db.data['total_donated']:.2f} USDT
+   🎯 Донатов: {db.data['stats']['total_donations']}
+
+📁 *Файлы бэкапа:*
+• {DB_FILE} (основная база)
+• {BACKUP_FILE} (автобэкап)
+• {backup_filename} (ручной бэкап)
+
+⚠️ *Рекомендации:*
+1. Регулярно скачивайте бэкапы
+2. Храните в безопасном месте
+3. Проверяйте целостность данных
+"""
+        
+        await callback.message.edit_caption(
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
+        )
+    
+    elif action == "admin_clear_cache":
+        # Очистка кэша
+        import shutil
+        if os.path.exists(IMAGE_CACHE_DIR):
+            shutil.rmtree(IMAGE_CACHE_DIR)
+            os.makedirs(IMAGE_CACHE_DIR)
+        
+        text = """
+🗑️ *ОЧИСТКА КЭША*
+
+✅ Кэш изображений успешно очищен!
+
+📁 Удалены:
+• Сгенерированные изображения
+• Временные файлы
+• Кэшированные превью
+
+💡 *Эффект:*
+• Освобождено место на диске
+• Новые изображения будут сгенерированы заново
+• Не влияет на базу данных пользователей
+
+⚠️ *Примечание:* Очистка кэша не удаляет
+важную информацию о пользователях и донатах.
+"""
+        
+        await callback.message.edit_caption(
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
+        )
+    
+    await callback.answer()
+
+@dp.message(AdminState.waiting_broadcast)
+async def process_broadcast(message: types.Message, state: FSMContext):
+    """Обработка рассылки"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    broadcast_text = message.text or message.caption
+    if not broadcast_text:
+        await message.answer("❌ Сообщение пустое!")
+        await state.clear()
+        return
+    
+    # Статистика рассылки
+    total_users = db.data['stats']['total_users']
+    sent_count = 0
+    failed_count = 0
+    
+    # Отправляем прогресс
+    progress_msg = await message.answer(
+        f"📢 *Начинаю рассылку...*\n\n"
+        f"👥 Всего пользователей: {total_users}\n"
+        f"✅ Отправлено: 0/{total_users}\n"
+        f"❌ Ошибок: 0\n"
+        f"⏱️ Примерное время: {total_users//10} секунд",
+        parse_mode="Markdown"
+    )
+    
+    # Рассылка
+    for user_id_str in list(db.data["users"].keys()):
+        try:
+            user_id = int(user_id_str)
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"📢 *РАССЫЛКА ОТ BANANA NFT*\n\n{broadcast_text}\n\n"
+                     f"💬 С уважением, команда Banana NFT 🍌",
+                parse_mode="Markdown"
+            )
+            sent_count += 1
+            
+            # Обновляем прогресс каждые 10 сообщений
+            if sent_count % 10 == 0:
+                try:
+                    await progress_msg.edit_text(
+                        f"📢 *Рассылка в процессе...*\n\n"
+                        f"👥 Всего пользователей: {total_users}\n"
+                        f"✅ Отправлено: {sent_count}/{total_users}\n"
+                        f"❌ Ошибок: {failed_count}\n"
+                        f"📊 Прогресс: {(sent_count/total_users)*100:.1f}%",
+                        parse_mode="Markdown"
+                    )
+                except:
+                    pass
+            
+            # Задержка чтобы не превысить лимиты Telegram
+            await asyncio.sleep(0.1)
+            
+        except Exception as e:
+            failed_count += 1
+            logger.error(f"Ошибка отправки пользователю {user_id_str}: {e}")
+    
+    # Финальное сообщение
+    await progress_msg.edit_text(
+        f"✅ *РАССЫЛКА ЗАВЕРШЕНА!*\n\n"
+        f"📊 *Результаты:*\n"
+        f"👥 Всего пользователей: {total_users}\n"
+        f"✅ Успешно отправлено: {sent_count}\n"
+        f"❌ Не отправлено: {failed_count}\n"
+        f"📈 Процент доставки: {(sent_count/total_users)*100:.1f}%\n\n"
+        f"💡 *Рекомендации:*\n"
+        f"• Не отправляйте рассылки чаще 1 раза в день\n"
+        f"• Используйте Markdown для форматирования\n"
+        f"• Тестируйте сообщение перед рассылкой",
+        parse_mode="Markdown"
+    )
+    
+    # Логируем рассылку
+    db.data["events"].append({
+        "type": "broadcast",
+        "admin_id": ADMIN_ID,
+        "text_preview": broadcast_text[:100],
+        "sent_count": sent_count,
+        "failed_count": failed_count,
+        "date": datetime.now().isoformat()
+    })
+    db.save()
+    
+    await state.clear()
+
+# ============ АДМИН КОМАНДЫ ============
+@dp.message(Command("add_goal"))
+async def cmd_add_goal(message: types.Message):
+    """Добавление новой цели"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        args = message.text.split(maxsplit=3)
+        if len(args) < 4:
+            await message.answer(
+                "❌ *Использование:* /add_goal [сумма] [название] [награда]\n"
+                "Пример: /add_goal 1000 \"Золотой банан\" \"Все получат NFT\"",
+                parse_mode="Markdown"
+            )
+            return
+        
+        target = float(args[1])
+        name = args[2]
+        reward = args[3]
+        
+        new_goal = {
+            "target": target,
+            "name": name,
+            "reward": reward,
+            "achieved": False
+        }
+        
+        db.data["goals"].append(new_goal)
+        db.save()
+        
+        await message.answer(
+            f"✅ *Цель добавлена!*\n\n"
+            f"🎯 *Название:* {name}\n"
+            f"💰 *Цель:* {target} USDT\n"
+            f"🎁 *Награда:* {reward}\n\n"
+            f"📊 Всего целей: {len(db.data['goals'])}",
+            parse_mode="Markdown"
+        )
+        
+    except ValueError:
+        await message.answer("❌ Ошибка: неверный формат суммы!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+@dp.message(Command("set_mindonation"))
+async def cmd_set_mindonation(message: types.Message):
+    """Изменение минимального доната"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer(
+                "❌ *Использование:* /set_mindonation [сумма]\n"
+                "Пример: /set_mindonation 0.5",
+                parse_mode="Markdown"
+            )
+            return
+        
+        new_min = float(args[1])
+        if new_min < 0.01:
+            await message.answer("❌ Минимальная сумма: 0.01 USDT")
+            return
+        
+        old_min = db.data['settings']['min_donation']
+        db.data['settings']['min_donation'] = new_min
+        db.data['settings']['last_reset'] = datetime.now().isoformat()
+        db.save()
+        
+        await message.answer(
+            f"✅ *Минимальный донат изменен!*\n\n"
+            f"📊 *Старое значение:* {old_min} USDT\n"
+            f"🎯 *Новое значение:* {new_min} USDT\n\n"
+            f"💡 Изменение вступит в силу для новых донатов.",
+            parse_mode="Markdown"
+        )
+        
+    except ValueError:
+        await message.answer("❌ Ошибка: неверный формат суммы!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+@dp.message(Command("reset_stats"))
+async def cmd_reset_stats(message: types.Message):
+    """Сброс статистики"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    # Создаем подтверждение
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, сбросить", callback_data="confirm_reset"),
+            InlineKeyboardButton(text="❌ Нет, отмена", callback_data="cancel_reset")
+        ]
+    ])
     
     await message.answer(
-        text=admin_text,
+        "⚠️ *ПОДТВЕРЖДЕНИЕ СБРОСА СТАТИСТИКИ*\n\n"
+        "Вы уверены что хотите сбросить статистику?\n\n"
+        "🗑️ *Будет удалено:*\n"
+        "• Общая сумма донатов\n"
+        "• Количество донатов\n"
+        "• Рекордный донат\n"
+        "• Время последнего доната\n\n"
+        "👥 *НЕ будет удалено:*\n"
+        "• Пользователи и их данные\n"
+        "• Личная история донатов\n"
+        "• Ранги и уровни\n"
+        "• Полученные подарки\n\n"
+        "❗ *Это действие нельзя отменить!*",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        reply_markup=keyboard
     )
+
+@dp.callback_query(F.data == "confirm_reset")
+async def callback_confirm_reset(callback: types.CallbackQuery):
+    """Подтверждение сброса статистики"""
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
+    # Сохраняем старые значения для лога
+    old_total = db.data['total_donated']
+    old_donations = db.data['stats']['total_donations']
+    old_biggest = db.data['stats']['biggest_donation']
+    
+    # Сбрасываем статистику
+    db.data['total_donated'] = 0
+    db.data['stats']['total_donations'] = 0
+    db.data['stats']['biggest_donation'] = 0
+    db.data['stats']['last_donation_time'] = None
+    db.data['settings']['last_reset'] = datetime.now().isoformat()
+    
+    # Сохраняем событие
+    db.data["events"].append({
+        "type": "stats_reset",
+        "admin_id": ADMIN_ID,
+        "old_total": old_total,
+        "old_donations": old_donations,
+        "old_biggest": old_biggest,
+        "date": datetime.now().isoformat()
+    })
+    
+    db.save()
+    
+    await callback.message.edit_text(
+        f"✅ *СТАТИСТИКА СБРОШЕНА!*\n\n"
+        f"📊 *Старые значения:*\n"
+        f"💰 Общая сумма: {old_total:.2f} USDT\n"
+        f"🎯 Количество донатов: {old_donations}\n"
+        f"🏆 Рекордный донат: {old_biggest:.2f} USDT\n\n"
+        f"🔄 *Новые значения:*\n"
+        f"💰 Общая сумма: 0 USDT\n"
+        f"🎯 Количество донатов: 0\n"
+        f"🏆 Рекордный донат: 0 USDT\n\n"
+        f"📅 Время сброса: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"👤 Администратор: @{callback.from_user.username or 'N/A'}",
+        parse_mode="Markdown"
+    )
+    
+    await callback.answer()
+
+@dp.callback_query(F.data == "cancel_reset")
+async def callback_cancel_reset(callback: types.CallbackQuery):
+    """Отмена сброса статистики"""
+    await callback.message.edit_text(
+        "❌ *СБРОС СТАТИСТИКИ ОТМЕНЕН*\n\n"
+        "Статистика проекта не была изменена.",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+# ============ ОБРАБОТКА ОШИБОК ============
+@dp.errors()
+async def errors_handler(update: types.Update, exception: Exception):
+    """Глобальный обработчик ошибок"""
+    logger.error(f"Ошибка: {exception}", exc_info=True)
+    
+    # Пытаемся отправить сообщение об ошибке пользователю
+    try:
+        if update.message:
+            await update.message.answer(
+                "😕 *Упс! Произошла ошибка*\n\n"
+                "Наша команда уже работает над решением проблемы.\n"
+                "Попробуйте еще раз через несколько минут.\n\n"
+                "💡 Если ошибка повторяется, напишите @support",
+                parse_mode="Markdown"
+            )
+    except:
+        pass
+    
+    # Отправляем уведомление админу
+    try:
+        error_text = str(exception)[:1000]
+        await bot.send_message(
+            ADMIN_ID,
+            f"⚠️ *ОШИБКА В БОТЕ*\n\n"
+            f"🕐 Время: {datetime.now().strftime('%H:%M:%S')}\n"
+            f"❌ Ошибка: {error_text}\n"
+            f"👤 Пользователь: {update.message.from_user.id if update.message else 'N/A'}",
+            parse_mode="Markdown"
+        )
+    except:
+        pass
+    
+    return True
 
 # ============ ЗАПУСК БОТА ============
 async def main():
-    print("🍌 Banana NFT Bot запущен!")
-    print(f"🤖 Бот: @{(await bot.get_me()).username}")
+    """Основная функция запуска бота"""
+    print("=" * 50)
+    print("🍌 BANANA NFT BOT - ЗАПУСК...")
+    print("=" * 50)
     
-    # Создаем базу данных если нет
+    # Проверка токенов
+    if TELEGRAM_BOT_TOKEN == "ВАШ_ТЕЛЕГРАМ_ТОКЕН":
+        print("❌ ОШИБКА: Не установлен Telegram токен!")
+        print("🔄 Замените TELEGRAM_BOT_TOKEN в коде")
+        return
+    
+    if CRYPTO_BOT_TOKEN == "ВАШ_КРИПТОБОТ_ТОКЕН":
+        print("⚠️ ВНИМАНИЕ: Не установлен CryptoBot токен")
+        print("ℹ️ Донаты работать не будут, но бот запустится")
+    
+    # Проверка базы данных
+    print("📁 Проверка базы данных...")
     if not os.path.exists(DB_FILE):
-        save_db({"users": {}, "total_donated": 0, "top_donations": []})
+        print("✅ Создана новая база данных")
+    else:
+        print(f"✅ База данных загружена ({db.data['stats']['total_users']} пользователей)")
     
-    await dp.start_polling(bot)
+    # Запуск бота
+    print("🤖 Запуск бота...")
+    try:
+        me = await bot.get_me()
+        print(f"✅ Бот запущен: @{me.username} (ID: {me.id})")
+        print(f"👑 Админ ID: {ADMIN_ID}")
+        print(f"💰 CryptoBot: {'✅' if CRYPTO_BOT_TOKEN != 'ВАШ_КРИПТОБОТ_ТОКЕН' else '❌'}")
+        print("=" * 50)
+        print("📢 Бот готов к работе! Отправьте /start")
+        print("=" * 50)
+        
+        await dp.start_polling(bot)
+        
+    except Exception as e:
+        print(f"❌ Ошибка запуска бота: {e}")
+    finally:
+        # Закрытие сессий
+        await crypto_bot.close()
+        await bot.session.close()
+        print("👋 Бот остановлен")
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
