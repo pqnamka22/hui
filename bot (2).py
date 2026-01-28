@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import uuid
+import aiohttp
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message,
@@ -9,18 +12,24 @@ from aiogram.types import (
 )
 from aiogram.filters import CommandStart
 
-API_TOKEN = "8536282991:AAFDzgiXbhJG-GSuKci04oLy3Ny4bpdD9Yw"
+# ======================
+# CONFIG
+# ======================
+BOT_TOKEN = "8536282991:AAFDzgiXbhJG-GSuKci04oLy3Ny4bpdD9Yw"
+CRYPTOBOT_TOKEN = "522930:AAl0Ojn6IiEeAZH2NP2nZ4ZjUgBR6getqjL"
+
+CRYPTOBOT_API = "https://pay.crypt.bot/api"
 
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(API_TOKEN)
+bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 # ======================
-# IN-MEMORY STORAGE
+# STORAGE (IN-MEMORY)
 # ======================
-users_spent = {}   # user_id -> stars spent
-awaiting_custom = set()  # user_ids waiting custom amount
+users_spent = {}           # user_id -> total USDT
+pending_invoices = {}     # invoice_id -> user_id
 
 
 # ======================
@@ -29,16 +38,12 @@ awaiting_custom = set()  # user_ids waiting custom amount
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="⭐ 10", callback_data="pay_10"),
-            InlineKeyboardButton(text="⭐ 50", callback_data="pay_50"),
-            InlineKeyboardButton(text="⭐ 100", callback_data="pay_100"),
+            InlineKeyboardButton(text="💸 5 USDT", callback_data="pay_5"),
+            InlineKeyboardButton(text="💸 10 USDT", callback_data="pay_10"),
         ],
         [
-            InlineKeyboardButton(text="🔥 500", callback_data="pay_500"),
-            InlineKeyboardButton(text="💎 1000", callback_data="pay_1000"),
-        ],
-        [
-            InlineKeyboardButton(text="✍️ Своя сумма", callback_data="custom"),
+            InlineKeyboardButton(text="🔥 25 USDT", callback_data="pay_25"),
+            InlineKeyboardButton(text="💎 50 USDT", callback_data="pay_50"),
         ],
         [
             InlineKeyboardButton(text="🏆 Рейтинг", callback_data="rating"),
@@ -47,16 +52,74 @@ def main_kb():
 
 
 # ======================
+# CRYPTOBOT API
+# ======================
+async def create_invoice(amount: float, user_id: int):
+    invoice_id = str(uuid.uuid4())
+
+    payload = {
+        "asset": "USDT",
+        "amount": amount,
+        "description": "BANANA · BE RICH",
+        "hidden_message": "Ты реально это сделал.",
+        "payload": invoice_id,
+        "allow_comments": False,
+        "expires_in": 3600
+    }
+
+    headers = {
+        "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{CRYPTOBOT_API}/createInvoice",
+            json=payload,
+            headers=headers
+        ) as resp:
+            data = await resp.json()
+
+    if not data.get("ok"):
+        raise Exception(data)
+
+    pending_invoices[invoice_id] = user_id
+    return data["result"]["pay_url"]
+
+
+async def check_invoice(invoice_id: str):
+    headers = {
+        "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{CRYPTOBOT_API}/getInvoices",
+            params={"asset": "USDT", "invoice_ids": invoice_id},
+            headers=headers
+        ) as resp:
+            data = await resp.json()
+
+    if not data.get("ok"):
+        return False
+
+    items = data["result"]["items"]
+    if not items:
+        return False
+
+    return items[0]["status"] == "paid", float(items[0]["amount"])
+
+
+# ======================
 # HELPERS
 # ======================
-def add_spent(user_id: int, amount: int):
-    users_spent[user_id] = users_spent.get(user_id, 0) + amount
+def add_spent(uid: int, amount: float):
+    users_spent[uid] = users_spent.get(uid, 0) + amount
 
 
-def get_place(user_id: int):
+def get_place(uid: int):
     sorted_users = sorted(users_spent.items(), key=lambda x: x[1], reverse=True)
-    for i, (uid, _) in enumerate(sorted_users, start=1):
-        if uid == user_id:
+    for i, (u, _) in enumerate(sorted_users, 1):
+        if u == uid:
             return i
     return None
 
@@ -68,8 +131,8 @@ def get_place(user_id: int):
 async def start(msg: Message):
     await msg.answer(
         "🍌 *BANANA · BE RICH*\n\n"
-        "Тут не покупают NFT.\n"
-        "Тут *сжигают деньги*, чтобы все знали, кто жирнее.\n\n"
+        "Здесь не инвестируют.\n"
+        "Здесь *сжигают USDT*, чтобы все видели.\n\n"
         "👇 Выбирай сумму:",
         reply_markup=main_kb(),
         parse_mode="Markdown"
@@ -78,69 +141,65 @@ async def start(msg: Message):
 
 @dp.callback_query(F.data.startswith("pay_"))
 async def pay(call: CallbackQuery):
-    amount = int(call.data.split("_")[1])
+    amount = float(call.data.split("_")[1])
     uid = call.from_user.id
 
-    add_spent(uid, amount)
-    place = get_place(uid)
+    url = await create_invoice(amount, uid)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Оплатить", url=url)],
+        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_{url.split('=')[-1]}")]
+    ])
 
     await call.message.answer(
-        f"🔥 Ты сжёг *{amount} ⭐*\n"
-        f"💰 Всего: *{users_spent[uid]} ⭐*\n"
-        f"🏆 Место в топе: *#{place}*",
-        parse_mode="Markdown",
-        reply_markup=main_kb()
+        f"💸 *{amount} USDT*\n\n"
+        "Нажми «Оплатить», потом «Проверить оплату».",
+        reply_markup=kb,
+        parse_mode="Markdown"
     )
     await call.answer()
 
 
-@dp.callback_query(F.data == "custom")
-async def custom(call: CallbackQuery):
-    awaiting_custom.add(call.from_user.id)
-    await call.message.answer(
-        "✍️ Введи сумму звезд (число):"
-    )
-    await call.answer()
+@dp.callback_query(F.data.startswith("check_"))
+async def check(call: CallbackQuery):
+    invoice_id = call.data.replace("check_", "")
 
-
-@dp.message(F.text.regexp(r"^\d+$"))
-async def custom_amount(msg: Message):
-    uid = msg.from_user.id
-    if uid not in awaiting_custom:
+    if invoice_id not in pending_invoices:
+        await call.answer("Инвойс не найден", show_alert=True)
         return
 
-    amount = int(msg.text)
-    awaiting_custom.remove(uid)
-
-    if amount <= 0 or amount > 1_000_000:
-        await msg.answer("❌ Сумма неадекватна.")
+    paid, amount = await check_invoice(invoice_id)
+    if not paid:
+        await call.answer("❌ Пока не оплачено")
         return
 
+    uid = pending_invoices.pop(invoice_id)
     add_spent(uid, amount)
     place = get_place(uid)
 
-    await msg.answer(
-        f"🔥 КРАСИВО.\n"
-        f"Ты въебал *{amount} ⭐*\n\n"
-        f"💰 Всего: *{users_spent[uid]} ⭐*\n"
-        f"🏆 Ты теперь *#{place}*",
+    await call.message.answer(
+        f"🔥 *ОПЛАЧЕНО*\n\n"
+        f"Ты сжёг *{amount} USDT*\n"
+        f"💰 Всего: *{users_spent[uid]} USDT*\n"
+        f"🏆 Место: *#{place}*",
         parse_mode="Markdown",
         reply_markup=main_kb()
     )
+    await call.answer("✅ Успешно")
 
 
 @dp.callback_query(F.data == "rating")
 async def rating(call: CallbackQuery):
     if not users_spent:
-        await call.message.answer("Пока никто не сжёг ни копейки.")
+        await call.message.answer("Пока никто не сжёг USDT.")
         await call.answer()
         return
 
     top = sorted(users_spent.items(), key=lambda x: x[1], reverse=True)[:10]
 
-    text = "🏆 *ТОП ЖИРНЫХ*\n\n"
-    for i, (uid, total) in enumerate(top, start=1):
-        text += f"{i}. {uid} — *{total} ⭐*\n"
+    text = "🏆 *ТОП КИТОВ*\n\n"
+    for i, (uid, total) in enumerate(top, 1):
+        text += f"{i}. {uid} — *{total} USDT*\n"
 
     await call.message.answer(text, parse_mode="Markdown", reply_markup=main_kb())
     await call.answer()
