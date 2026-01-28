@@ -29,8 +29,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN"
-ADMIN_ID = 123456789  # Your Telegram ID
+TELEGRAM_BOT_TOKEN = "8536282991:AAHUyTx0r7Q03bwDRokvogbmJAIbkAnYVpM"
+ADMIN_ID = 6185460659  # Your Telegram ID
 
 DB_FILE = "banana_nft_db.json"
 
