@@ -311,8 +311,9 @@ class CryptoBot:
         self.session = None
     
     async def ensure_session(self):
-        if not self.session:
-            self.session = aiohttp.ClientSession()
+        if not self.session or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=30)
+            self.session = aiohttp.ClientSession(timeout=timeout)
     
     async def create_invoice(self, amount: float, currency: str = "USDT", 
                            description: str = "", user_id: int = None) -> dict:
@@ -324,17 +325,22 @@ class CryptoBot:
             "Content-Type": "application/json"
         }
         
+        # Форматируем сумму (CryptoBot принимает строку)
+        amount_str = str(amount)
+        
         payload = {
-            "amount": str(amount),
+            "amount": amount_str,
             "asset": currency,
-            "description": description or f"Donation to Banana NFT",
-            "hidden_message": "🎉 Спасибо за поддержку Banana NFT!",
+            "description": description[:255] or f"Donation to Banana NFT",
+            "hidden_message": "🎉 Thank you for supporting Banana NFT!",
             "paid_btn_url": "https://t.me/banananftbot",
-            "paid_btn_text": "Вернуться в бота",
-            "payload": str(user_id) if user_id else "banana_nft",
-            "allow_comments": True,
-            "expires_in": 3600  # 1 час
+            "paid_btn_text": "Return to bot",
+            "payload": str(user_id) if user_id else f"banana_{datetime.now().timestamp()}",
+            "allow_comments": False,
+            "expires_in": 3600
         }
+        
+        logger.info(f"Creating invoice: {amount} {currency} for user {user_id}")
         
         try:
             async with self.session.post(
@@ -343,29 +349,40 @@ class CryptoBot:
                 headers=headers
             ) as response:
                 data = await response.json()
+                logger.info(f"CryptoBot response: {data}")
                 
                 if data.get("ok"):
                     invoice = data["result"]
                     return {
                         "success": True,
-                        "invoice_id": invoice["invoice_id"],
+                        "invoice_id": str(invoice["invoice_id"]),
                         "pay_url": invoice["pay_url"],
                         "amount": invoice["amount"],
                         "status": invoice["status"],
-                        "expires_at": invoice.get("expires_at")
+                        "expires_at": invoice.get("expires_at", ""),
+                        "currency": currency
                     }
                 else:
                     error = data.get("error", {})
+                    error_msg = error.get("name", str(error))
+                    logger.error(f"CryptoBot error: {error_msg}")
                     return {
                         "success": False,
-                        "error": error.get("name", "Unknown error"),
+                        "error": error_msg,
                         "code": error.get("code")
                     }
-        except Exception as e:
-            logger.error(f"CryptoBot error: {e}")
+                    
+        except aiohttp.ClientError as e:
+            logger.error(f"CryptoBot connection error: {e}")
             return {
                 "success": False,
-                "error": str(e)
+                "error": f"Connection error: {str(e)}"
+            }
+        except Exception as e:
+            logger.error(f"CryptoBot unexpected error: {e}")
+            return {
+                "success": False,
+                "error": f"Unexpected error: {str(e)}"
             }
     
     async def get_invoice(self, invoice_id: str) -> dict:
@@ -389,19 +406,16 @@ class CryptoBot:
                         "success": True,
                         "status": invoice["status"],
                         "paid_at": invoice.get("paid_at"),
-                        "amount": invoice.get("amount")
-                    }
+                        "amount": invoice.get("amount"),
+                        "asset": invoice.get("asset")}
                 return {"success": False, "error": "Invoice not found"}
         except Exception as e:
             return {"success": False, "error": str(e)}
     
     async def close(self):
         """Закрытие сессии"""
-        if self.session:
+        if self.session and not self.session.closed:
             await self.session.close()
-
-# Инициализация CryptoBot
-crypto_bot = CryptoBot(CRYPTO_BOT_TOKEN)
 
 # ============ ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ============
 class ImageGenerator:
