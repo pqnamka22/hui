@@ -33,8 +33,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # 🔴🔴🔴 ЗАМЕНИТЕ ЭТИ ТОКЕНЫ! 🔴🔴🔴
-TELEGRAM_BOT_TOKEN = "ВАШ_ТЕЛЕГРАМ_ТОКЕН"
-ADMIN_ID = 123456789  # Ваш Telegram ID
+TELEGRAM_BOT_TOKEN = "8536282991:AAHUyTx0r7Q03bwDRokvogbmJAIbkAnYVpM"
+ADMIN_ID = 6185460659 # Ваш Telegram ID
 
 # Константы
 DB_FILE = "banana_db.json"
